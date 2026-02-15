@@ -1,0 +1,11 @@
+[package]
+name = "rdm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = "4.5.58"
+futures = "0.3.31"
+indicatif = "0.18.3"
+tokio = "1.49.0"
+serde = { version = "1.0.228", features = ["derive"] }
