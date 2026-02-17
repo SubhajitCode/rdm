@@ -58,10 +58,11 @@ async fn test_probe_resumable_server() {
     let server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(header("Range", "bytes=0-"))
+        .and(header("Range", "bytes=0-0"))
         .respond_with(
             ResponseTemplate::new(206)
-                .insert_header("Content-Length", "5242880")
+                .insert_header("Content-Range", "bytes 0-0/5242880")
+                .insert_header("Content-Length", "1")
                 .insert_header("Content-Type", "application/octet-stream")
                 .insert_header(
                     "Content-Disposition",
@@ -78,7 +79,7 @@ async fn test_probe_resumable_server() {
     let probe = probe_url(&client, &header_data).await.unwrap();
 
     assert!(probe.resumable);
-    assert_eq!(probe.resource_size, Some(0)); // empty body, Content-Length header present but body is empty
+    assert_eq!(probe.resource_size, Some(5242880));
     assert_eq!(probe.attachment_name, Some("testfile.bin".to_string()));
     assert_eq!(
         probe.content_type,
@@ -139,7 +140,7 @@ async fn test_download_piece_full_body() {
         .await;
 
     let client = Client::new();
-    let header_data = make_header_data(&server.uri());
+    let header_data = Arc::new(make_header_data(&server.uri()));
     let temp_dir = tempfile::tempdir().unwrap();
     let cancel_token = CancellationToken::new();
 
@@ -183,7 +184,7 @@ async fn test_download_piece_with_range() {
         .await;
 
     let client = Client::new();
-    let header_data = make_header_data(&server.uri());
+    let header_data = Arc::new(make_header_data(&server.uri()));
     let temp_dir = tempfile::tempdir().unwrap();
     let cancel_token = CancellationToken::new();
 
@@ -223,7 +224,7 @@ async fn test_download_piece_cancellation() {
         .await;
 
     let client = Client::new();
-    let header_data = make_header_data(&server.uri());
+    let header_data = Arc::new(make_header_data(&server.uri()));
     let temp_dir = tempfile::tempdir().unwrap();
     let cancel_token = CancellationToken::new();
 
@@ -253,7 +254,7 @@ async fn test_download_piece_cancellation() {
 async fn test_download_piece_retries_on_failure() {
     let client = Client::new();
     // Point to a port nothing is listening on — immediate connection refused
-    let header_data = make_header_data("http://127.0.0.1:1");
+    let header_data = Arc::new(make_header_data("http://127.0.0.1:1"));
     let temp_dir = tempfile::tempdir().unwrap();
     let cancel_token = CancellationToken::new();
 
@@ -287,7 +288,7 @@ async fn test_download_piece_progress_callback_called() {
         .await;
 
     let client = Client::new();
-    let header_data = make_header_data(&server.uri());
+    let header_data = Arc::new(make_header_data(&server.uri()));
     let temp_dir = tempfile::tempdir().unwrap();
     let cancel_token = CancellationToken::new();
 

@@ -2,16 +2,29 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use clap::Parser;
 use tokio::sync::mpsc;
 
 use rdm::rdm_core::downloader::http_downloader::HttpDownloader;
 use rdm::rdm_core::downloader::strategy::multipart_download_strategy::MultipartDownloadStrategy;
 
+#[derive(Parser)]
+#[command(name = "rdm", about = "Rust Download Manager")]
+struct Args {
+    /// URL to download
+    #[arg(short, long, default_value = "https://proof.ovh.net/files/1Mb.dat")]
+    url: String,
+
+    /// Output file path
+    #[arg(short, long, default_value = "downloaded_file")]
+    output: PathBuf,
+}
+
 #[tokio::main]
 async fn main() {
-    // OVH test file: 1 MB, supports Range requests (resumable)
-    let url = "https://proof.ovh.net/files/1Mb.dat".to_string();
-    let output_path = PathBuf::from("downloaded_1MB.dat");
+    let args = Args::parse();
+    let url = args.url;
+    let output_path = args.output;
 
     // Channel for progress events
     let (progress_tx, mut progress_rx) = mpsc::channel(256);
@@ -22,7 +35,7 @@ async fn main() {
         output_path,
         progress_tx,
     ));
-    let downloader = HttpDownloader::new(strategy);
+    let downloader = HttpDownloader::new(strategy.clone());
 
     // Spawn a task to print progress
     let progress_handle = tokio::spawn(async move {
@@ -38,7 +51,14 @@ async fn main() {
     println!("Starting download: {}", url);
     let start = Instant::now();
 
-    match downloader.download().await {
+    let result = downloader.download().await;
+
+    // Drop the strategy (and its progress_tx sender) so the progress
+    // receiver task can finish when the channel is drained.
+    drop(downloader);
+    drop(strategy);
+
+    match result {
         Ok(()) => {
             let elapsed = start.elapsed();
             println!(

@@ -75,6 +75,7 @@ pub struct ProxyInfo {
 pub struct DownloaderState {
     pub id: String,
     pub url: String,
+    pub output_path: Option<String>,
     pub temp_dir: String,
     pub file_size: i64,
     pub headers: HashMap<String, Vec<String>>,

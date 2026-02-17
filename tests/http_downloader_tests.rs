@@ -93,12 +93,8 @@ async fn test_http_downloader_end_to_end_with_range_server() {
     let downloader = HttpDownloader::new(strategy.clone());
     downloader.download().await.unwrap();
 
-    // The output filename comes from Content-Disposition: "rangetest.bin"
-    // but we need to figure out what postprocess actually wrote.
-    // Check state for the attachment_name
-    // Since we can't access strategy internals easily here,
-    // we know postprocess uses attachment_name from probe = "rangetest.bin"
-    let output = std::fs::read("rangetest.bin").unwrap();
+    // output_path takes precedence over attachment_name in postprocess()
+    let output = std::fs::read(&output_filename).unwrap();
 
     assert_eq!(
         output.len(),
@@ -111,7 +107,7 @@ async fn test_http_downloader_end_to_end_with_range_server() {
     );
 
     // Cleanup
-    let _ = std::fs::remove_file("rangetest.bin");
+    let _ = std::fs::remove_file(&output_filename);
 }
 
 #[tokio::test]
@@ -132,27 +128,28 @@ async fn test_http_downloader_non_resumable() {
         .await;
 
     let (tx, _rx) = mpsc::channel(256);
+    let output_filename = "non_resumable_test.bin";
     let strategy = Arc::new(MultipartDownloadStrategy::new(
         server.uri(),
-        PathBuf::from("non_resumable_test.bin"),
+        PathBuf::from(output_filename),
         tx,
     ));
 
     let downloader = HttpDownloader::new(strategy);
     downloader.download().await.unwrap();
 
-    // Non-resumable: no Content-Disposition -> fallback name "download.bin"
-    let output = std::fs::read("download.bin").unwrap();
+    // output_path takes precedence — reads from the path we specified
+    let output = std::fs::read(output_filename).unwrap();
     assert_eq!(output.len(), body_size);
     assert_eq!(output, body);
 
-    let _ = std::fs::remove_file("download.bin");
+    let _ = std::fs::remove_file(output_filename);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_http_downloader_stop_during_download() {
     let body_size: usize = 2 * 1024 * 1024; // 2 MB
-    let body = generate_test_data(body_size);
+    let _body = generate_test_data(body_size);
 
     let server = MockServer::start().await;
 
@@ -166,12 +163,16 @@ async fn test_http_downloader_stop_during_download() {
         .mount(&server)
         .await;
 
-    // Probe response: mount AFTER the catch-all so it takes priority for "Range: bytes=0-"
+    // Probe response: mount AFTER the catch-all so it takes priority for "Range: bytes=0-0"
     Mock::given(method("GET"))
-        .and(header_regex("Range", "^bytes=0-$"))
+        .and(header_regex("Range", "^bytes=0-0$"))
         .respond_with(
             ResponseTemplate::new(206)
-                .set_body_bytes(body.clone())
+                .set_body_bytes(vec![0u8; 1]) // only 1 byte for probe
+                .insert_header(
+                    "Content-Range",
+                    format!("bytes 0-0/{}", body_size),
+                )
                 .insert_header("Content-Type", "application/octet-stream")
                 .insert_header(
                     "Content-Disposition",
@@ -277,5 +278,5 @@ async fn test_http_downloader_progress_events_received() {
     );
     assert!(count > 0, "should have received at least one progress event");
 
-    let _ = std::fs::remove_file("rangetest.bin");
+    let _ = std::fs::remove_file("progress_test.bin");
 }

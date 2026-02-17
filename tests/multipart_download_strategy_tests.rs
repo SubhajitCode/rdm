@@ -119,13 +119,17 @@ async fn setup_resumable_server(body_size: usize) -> (MockServer, Vec<u8>) {
     let server = MockServer::start().await;
     let body = generate_test_data(body_size);
 
-    // Probe request: Range: bytes=0-
-    // Return 206 with the full body (simulates a real server)
+    // Probe request: Range: bytes=0-0
+    // Return 206 with Content-Range header to indicate total size
     Mock::given(method("GET"))
-        .and(header("Range", "bytes=0-"))
+        .and(header("Range", "bytes=0-0"))
         .respond_with(
             ResponseTemplate::new(206)
-                .set_body_bytes(body.clone())
+                .set_body_bytes(vec![0u8; 1]) // only 1 byte
+                .insert_header(
+                    "Content-Range",
+                    format!("bytes 0-0/{}", body.len()),
+                )
                 .insert_header("Content-Type", "application/octet-stream")
                 .insert_header(
                     "Content-Disposition",
@@ -385,14 +389,13 @@ async fn test_postprocess_assembles_pieces_in_order() {
     let (tx, _rx) = mpsc::channel(16);
 
     let strategy =
-        MultipartDownloadStrategy::new("http://unused".to_string(), PathBuf::from("out.bin"), tx);
+        MultipartDownloadStrategy::new("http://unused".to_string(), PathBuf::from("assembled_output.bin"), tx);
 
-    // Override state with known temp_dir and attachment_name
+    // Override state with known temp_dir
     {
         let mut state = strategy.state().write().await;
         let s = state.as_mut().unwrap();
         s.temp_dir = temp_dir.path().to_string_lossy().to_string();
-        s.attachment_name = Some("assembled_output.bin".to_string());
     }
 
     // Create 3 pieces with known data
@@ -500,18 +503,11 @@ async fn test_full_lifecycle_with_mock_server() {
 
     strategy.preprocess().await.unwrap();
 
-    // Override attachment_name after preprocess so we control the output filename
-    {
-        let mut state = strategy.state().write().await;
-        let _s = state.as_mut().unwrap();
-        _s.attachment_name = Some("lifecycle_test_output.bin".to_string());
-    }
-
     strategy.download().await.unwrap();
     strategy.postprocess().await.unwrap();
 
-    // Verify the assembled output
-    let output = std::fs::read("lifecycle_test_output.bin").unwrap();
+    // Verify the assembled output (output_path takes precedence)
+    let output = std::fs::read("lifecycle_test.bin").unwrap();
 
     // The mock server returns the full body for every Range request,
     // so each piece file contains the full body (not a slice).
@@ -522,5 +518,5 @@ async fn test_full_lifecycle_with_mock_server() {
     assert!(!output.is_empty(), "assembled output should not be empty");
 
     // Cleanup
-    let _ = std::fs::remove_file("lifecycle_test_output.bin");
+    let _ = std::fs::remove_file("lifecycle_test.bin");
 }

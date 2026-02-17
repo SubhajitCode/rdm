@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -32,16 +31,18 @@ pub struct MultipartDownloadStrategy {
 impl MultipartDownloadStrategy {
     pub fn new(
         url: String,
-        _output_path: PathBuf,
+        output_path: PathBuf,
         progress_tx: mpsc::Sender<ProgressEvent>,
     ) -> Self {
         let id = Uuid::new_v4().to_string();
         let temp_dir = std::env::temp_dir().join(&id);
+        let output_path_str = output_path.to_string_lossy().to_string();
 
         Self {
             state: Arc::new(RwLock::new(Some(DownloaderState {
                 id,
                 url,
+                output_path: Some(output_path_str),
                 temp_dir: temp_dir.to_string_lossy().to_string(),
                 file_size: -1,
                 headers: HashMap::new(),
@@ -55,7 +56,15 @@ impl MultipartDownloadStrategy {
                 content_type: None,
             }))),
             pieces: Arc::new(RwLock::new(HashMap::new())),
-            client: Arc::new(Client::new()),
+            // Tuned HTTP client: connection pool, timeouts, TCP optimizations
+            client: Arc::new(
+                Client::builder()
+                    .connect_timeout(std::time::Duration::from_secs(10))
+                    .pool_max_idle_per_host(MAX_CONNECTIONS) // match concurrency
+                    .tcp_nodelay(true)
+                    .build()
+                    .expect("failed to build HTTP client"),
+            ),
             cancel_token: CancellationToken::new(),
             progress_tx,
         }
@@ -158,28 +167,31 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         // 2. Probe the URL
         let probe = probe_url(&self.client, &header_data).await?;
 
-        // 3. Update state with probe results
-        {
+        // 3. Extract Copy fields before moving probe
+        let resumable = probe.resumable;
+        let resource_size = probe.resource_size;
+
+        // 4. Update state with probe results (move fields, don't clone)
+        let temp_dir_path = {
             let mut state = self.state.write().await;
             let s = state.as_mut().ok_or(DownloadError::InvalidState)?;
-            s.file_size = probe.resource_size.map(|sz| sz as i64).unwrap_or(-1);
-            s.url = probe.final_uri.clone(); // follow redirects
-            s.last_modified = probe.last_modified.clone();
-            s.resumable = probe.resumable;
-            s.attachment_name = probe.attachment_name.clone();
-            s.content_type = probe.content_type.clone();
-        }
+            s.file_size = resource_size.map(|sz| sz as i64).unwrap_or(-1);
+            s.url = probe.final_uri;        // move
+            s.last_modified = probe.last_modified;  // move
+            s.resumable = resumable;
+            s.attachment_name = probe.attachment_name;  // move
+            s.content_type = probe.content_type;  // move
+            s.temp_dir.clone()
+        };
 
-        // 4. Create temp directory
-        {
-            let state = self.state.read().await;
-            let s = state.as_ref().ok_or(DownloadError::InvalidState)?;
-            std::fs::create_dir_all(&s.temp_dir).map_err(DownloadError::Disk)?;
-        }
+        // 5. Create temp directory (async, non-blocking)
+        tokio::fs::create_dir_all(&temp_dir_path)
+            .await
+            .map_err(DownloadError::Disk)?;
 
-        // 5. Create pieces based on probe results
-        let new_pieces = if probe.resumable {
-            if let Some(file_size) = probe.resource_size {
+        // 6. Create pieces based on probe results
+        let new_pieces = if resumable {
+            if let Some(file_size) = resource_size {
                 create_pieces(file_size, MAX_CONNECTIONS)
             } else {
                 // Resumable but unknown size — single piece, open-ended
@@ -190,7 +202,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             vec![Piece::new(Uuid::new_v4().to_string(), 0, -1)]
         };
 
-        // 6. Store pieces
+        // 7. Store pieces
         {
             let mut pieces = self.pieces.write().await;
             pieces.clear();
@@ -205,7 +217,8 @@ impl DownloadStrategy for MultipartDownloadStrategy {
     /// Downloads all pieces concurrently. Each piece is downloaded in its own
     /// tokio task. Waits for all tasks to complete and propagates errors.
     async fn download(&self) -> Result<(), DownloadError> {
-        let header_data = build_header_data(&self.state).await?;
+        // Wrap HeaderData in Arc — shared across all piece tasks without cloning
+        let header_data = Arc::new(build_header_data(&self.state).await?);
 
         let temp_dir = {
             let state = self.state.read().await;
@@ -227,22 +240,16 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             return Ok(());
         }
 
-        // Mark all pieces as Downloading
-        {
-            let mut pieces_guard = self.pieces.write().await;
-            for piece in &pieces_to_download {
-                if let Some(p) = pieces_guard.get_mut(&piece.id) {
-                    p.state = SegmentState::Downloading;
-                }
-            }
-        }
+        // No need to mark pieces as Downloading here — download_piece() does it
+        // at piece_grabber.rs:90, and the cloned copies in the HashMap are never
+        // read during the download phase.
 
         // Spawn a tokio task for each piece — true concurrent downloads
         let mut handles = Vec::with_capacity(pieces_to_download.len());
 
         for piece in pieces_to_download {
             let client = Arc::clone(&self.client);
-            let header_data = header_data.clone();
+            let header_data = Arc::clone(&header_data); // cheap Arc clone
             let temp_dir = temp_dir.clone();
             let cancel_token = self.cancel_token.clone();
             let progress_tx = self.progress_tx.clone();
@@ -272,19 +279,23 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             handles.push((piece_id_for_handle, handle));
         }
 
-        // Wait for all tasks to complete and update piece states
+        // Wait for ALL tasks to complete, then update pieces in a single lock
+        let results: Vec<_> = futures::future::join_all(
+            handles.into_iter().map(|(id, handle)| async move {
+                (id, handle.await)
+            }),
+        )
+        .await;
+
+        let mut pieces_guard = self.pieces.write().await;
         let mut first_error: Option<DownloadError> = None;
 
-        for (piece_id, handle) in handles {
-            match handle.await {
+        for (piece_id, result) in results {
+            match result {
                 Ok(Ok(updated_piece)) => {
-                    // Piece downloaded successfully
-                    let mut pieces_guard = self.pieces.write().await;
                     pieces_guard.insert(piece_id, updated_piece);
                 }
                 Ok(Err(e)) => {
-                    // download_piece returned an error
-                    let mut pieces_guard = self.pieces.write().await;
                     if let Some(p) = pieces_guard.get_mut(&piece_id) {
                         p.state = SegmentState::Failed;
                     }
@@ -293,8 +304,6 @@ impl DownloadStrategy for MultipartDownloadStrategy {
                     }
                 }
                 Err(join_err) => {
-                    // Task panicked or was aborted
-                    let mut pieces_guard = self.pieces.write().await;
                     if let Some(p) = pieces_guard.get_mut(&piece_id) {
                         p.state = SegmentState::Failed;
                     }
@@ -304,6 +313,8 @@ impl DownloadStrategy for MultipartDownloadStrategy {
                 }
             }
         }
+
+        drop(pieces_guard);
 
         if let Some(e) = first_error {
             return Err(e);
@@ -327,52 +338,51 @@ impl DownloadStrategy for MultipartDownloadStrategy {
     /// Assembles all downloaded pieces into the final output file.
     /// Sorts pieces by offset and concatenates their temp files.
     async fn postprocess(&self) -> Result<(), DownloadError> {
-        let pieces = self.pieces.read().await;
-        let state = self.state.read().await;
+        // Extract all needed data under locks, then drop them before I/O
+        let (piece_ids, temp_dir, output_file) = {
+            let pieces = self.pieces.read().await;
+            let state = self.state.read().await;
+            let state = state.as_ref().ok_or(DownloadError::InvalidState)?;
 
-        let state = state.as_ref().ok_or(DownloadError::InvalidState)?;
-
-        // Verify all pieces are finished
-        for piece in pieces.values() {
-            if piece.state != SegmentState::Finished {
-                return Err(DownloadError::PieceFailed(format!(
-                    "piece {} is in state {:?}, expected Finished",
-                    piece.id, piece.state
-                )));
+            // Verify all pieces are finished
+            for piece in pieces.values() {
+                if piece.state != SegmentState::Finished {
+                    return Err(DownloadError::PieceFailed(format!(
+                        "piece {} is in state {:?}, expected Finished",
+                        piece.id, piece.state
+                    )));
+                }
             }
-        }
 
-        // Sort pieces by offset
-        let mut sorted: Vec<_> = pieces.values().collect();
-        sorted.sort_by_key(|p| p.offset);
+            // Sort pieces by offset
+            let mut sorted: Vec<_> = pieces.values().collect();
+            sorted.sort_by_key(|p| p.offset);
 
-        let temp_dir = state.temp_dir.clone();
-        let output_file = state
-            .attachment_name
-            .clone()
-            .unwrap_or_else(|| "download.bin".to_string());
+            let piece_ids: Vec<String> = sorted.iter().map(|p| p.id.clone()).collect();
+            let temp_dir = state.temp_dir.clone();
+            let output_file = state
+                .output_path
+                .clone()
+                .or_else(|| state.attachment_name.clone())
+                .unwrap_or_else(|| "download.bin".to_string());
 
-        // Collect piece IDs in order (clone to move into spawn_blocking)
-        let piece_ids: Vec<String> = sorted.iter().map(|p| p.id.clone()).collect();
+            (piece_ids, temp_dir, output_file)
+        }; // locks dropped here — not held during I/O
 
         // File assembly is CPU/IO bound — run on a blocking thread
         tokio::task::spawn_blocking(move || {
             use std::fs::File;
-            use std::io::{BufReader, BufWriter, Read};
+            use std::io::Write;
 
-            let mut output = BufWriter::new(File::create(&output_file)?);
+            let mut output = File::create(&output_file)?;
 
             for piece_id in &piece_ids {
                 let piece_path = PathBuf::from(&temp_dir).join(piece_id);
-                let mut input = BufReader::new(File::open(&piece_path)?);
-                let mut buf = [0u8; 64 * 1024]; // 64 KB copy buffer
-                loop {
-                    let n = input.read(&mut buf)?;
-                    if n == 0 {
-                        break;
-                    }
-                    output.write_all(&buf[..n])?;
-                }
+                let mut input = File::open(&piece_path)?;
+                // Use std::io::copy — on Linux it uses copy_file_range(2) for
+                // zero-copy kernel-side transfer. On macOS it uses an optimized
+                // internal buffer. Much better than manual 64KB buffer loops.
+                std::io::copy(&mut input, &mut output)?;
             }
 
             output.flush()?;

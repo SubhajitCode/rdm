@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-clap = "4.5.58"
+clap = { version = "4.5.58", features = ["derive"] }
 futures = "0.3.31"
 indicatif = "0.18.3"
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros", "time", "fs", "io-util"] }
@@ -15,6 +15,12 @@ base64 = "0.22.1"
 tokio-util = "0.7.18"
 uuid = { version = "1.21.0", features = ["v4"] }
 async-trait = "0.1.89"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
 
 [dev-dependencies]
 wiremock = "0.6"
