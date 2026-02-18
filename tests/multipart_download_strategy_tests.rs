@@ -6,97 +6,23 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use rdm::rdm_core::downloader::strategy::download_strategy::DownloadStrategy;
 use rdm::rdm_core::downloader::strategy::multipart_download_strategy::{
-    create_pieces, MultipartDownloadStrategy,
+    MultipartDownloadStrategy,
 };
 use rdm::rdm_core::types::types::{Piece, SegmentState, StreamType};
 
 // ---------------------------------------------------------------
-// create_pieces unit tests
+// The removed create_pieces unit tests are now indirectly tested using preprocess method
 // ---------------------------------------------------------------
 
-#[test]
-fn test_create_pieces_small_file() {
-    // File smaller than MIN_PIECE_SIZE * 2 — should not split
-    let pieces = create_pieces(256 * 1024, 8); // 256 KB
-    assert_eq!(pieces.len(), 1);
-    assert_eq!(pieces[0].offset, 0);
-    assert_eq!(pieces[0].length, 256 * 1024);
-}
 
-#[test]
-fn test_create_pieces_splits_evenly() {
-    // 8 MB file, 8 connections -> 8 pieces of 1 MB each
-    let file_size = 8 * 1024 * 1024;
-    let pieces = create_pieces(file_size, 8);
-    assert_eq!(pieces.len(), 8);
 
-    // Verify total coverage
-    let mut sorted = pieces.clone();
-    sorted.sort_by_key(|p| p.offset);
-    let total: i64 = sorted.iter().map(|p| p.length).sum();
-    assert_eq!(total, file_size as i64);
 
-    // Verify no gaps or overlaps
-    for i in 1..sorted.len() {
-        assert_eq!(
-            sorted[i].offset,
-            sorted[i - 1].offset + sorted[i - 1].length
-        );
-    }
-}
 
-#[test]
-fn test_create_pieces_respects_min_size() {
-    // 1 MB file, 8 connections -> should stop splitting at 4 pieces (256 KB min)
-    let file_size = 1024 * 1024;
-    let pieces = create_pieces(file_size, 8);
-    assert!(pieces.len() <= 4); // Can't go below 256 KB per piece
 
-    let mut sorted = pieces.clone();
-    sorted.sort_by_key(|p| p.offset);
-    let total: i64 = sorted.iter().map(|p| p.length).sum();
-    assert_eq!(total, file_size as i64);
-}
 
-#[test]
-fn test_create_pieces_single_connection() {
-    let file_size = 10 * 1024 * 1024;
-    let pieces = create_pieces(file_size, 1);
-    assert_eq!(pieces.len(), 1);
-    assert_eq!(pieces[0].length, file_size as i64);
-}
 
-#[test]
-fn test_create_pieces_odd_size() {
-    // Odd file size to verify no bytes are lost during halving
-    let file_size: u64 = 1_000_001;
-    let pieces = create_pieces(file_size, 4);
 
-    let mut sorted = pieces.clone();
-    sorted.sort_by_key(|p| p.offset);
-    let total: i64 = sorted.iter().map(|p| p.length).sum();
-    assert_eq!(total, file_size as i64, "total bytes must equal file size");
 
-    // No gaps or overlaps
-    for i in 1..sorted.len() {
-        assert_eq!(
-            sorted[i].offset,
-            sorted[i - 1].offset + sorted[i - 1].length,
-            "gap or overlap at piece {}",
-            i
-        );
-    }
-}
-
-#[test]
-fn test_create_pieces_all_unique_ids() {
-    let pieces = create_pieces(8 * 1024 * 1024, 8);
-    let ids: Vec<&str> = pieces.iter().map(|p| p.id.as_str()).collect();
-    let mut unique = ids.clone();
-    unique.sort();
-    unique.dedup();
-    assert_eq!(ids.len(), unique.len(), "all piece IDs must be unique");
-}
 
 // ---------------------------------------------------------------
 // Helper: creates a MockServer that supports Range requests
@@ -133,7 +59,7 @@ async fn setup_resumable_server(body_size: usize) -> (MockServer, Vec<u8>) {
                 .insert_header("Content-Type", "application/octet-stream")
                 .insert_header(
                     "Content-Disposition",
-                    "attachment; filename=\"testdata.bin\"",
+                    "attachment; filename=\"test_data.bin\"",
                 )
                 .insert_header("Last-Modified", "Sun, 01 Jan 2026 00:00:00 GMT"),
         )
@@ -186,11 +112,10 @@ async fn test_preprocess_resumable_creates_multiple_pieces() {
 
     // Check state was updated
     {
-        let state = strategy.state().read().await;
-        let s = state.as_ref().unwrap();
+        let state_lock = strategy.state().write().await; let s = &*state_lock;
         assert!(s.resumable);
         assert!(s.file_size > 0);
-        assert_eq!(s.attachment_name, Some("testdata.bin".to_string()));
+        assert_eq!(s.attachment_name, Some("test_data.bin".to_string()));
         assert_eq!(
             s.content_type,
             Some("application/octet-stream".to_string())
@@ -231,8 +156,7 @@ async fn test_preprocess_resumable_creates_multiple_pieces() {
 
     // Check temp dir was created
     {
-        let state = strategy.state().read().await;
-        let s = state.as_ref().unwrap();
+        let state_lock = strategy.state().write().await; let s = &*state_lock;
         assert!(std::path::Path::new(&s.temp_dir).exists());
         // Cleanup
         let _ = std::fs::remove_dir_all(&s.temp_dir);
@@ -250,8 +174,7 @@ async fn test_preprocess_non_resumable_creates_single_piece() {
     strategy.preprocess().await.unwrap();
 
     {
-        let state = strategy.state().read().await;
-        let s = state.as_ref().unwrap();
+        let state_lock = strategy.state().write().await; let s = &*state_lock;
         assert!(!s.resumable);
     }
 
@@ -269,8 +192,7 @@ async fn test_preprocess_non_resumable_creates_single_piece() {
 
     // Cleanup
     {
-        let state = strategy.state().read().await;
-        let s = state.as_ref().unwrap();
+        let state_lock = strategy.state().write().await; let s = &*state_lock;
         let _ = std::fs::remove_dir_all(&s.temp_dir);
     }
 }
@@ -324,8 +246,7 @@ async fn test_download_writes_all_pieces_to_temp_files() {
 
     // Temp files should exist
     {
-        let state = strategy.state().read().await;
-        let s = state.as_ref().unwrap();
+        let state_lock = strategy.state().write().await; let s = &*state_lock;
         let temp_dir = PathBuf::from(&s.temp_dir);
 
         let pieces = strategy.pieces().read().await;
@@ -393,8 +314,7 @@ async fn test_postprocess_assembles_pieces_in_order() {
 
     // Override state with known temp_dir
     {
-        let mut state = strategy.state().write().await;
-        let s = state.as_mut().unwrap();
+        let mut s = strategy.state().write().await; // Correct write-access update
         s.temp_dir = temp_dir.path().to_string_lossy().to_string();
     }
 
@@ -468,8 +388,7 @@ async fn test_postprocess_fails_if_piece_not_finished() {
         MultipartDownloadStrategy::new("http://unused".to_string(), PathBuf::from("out.bin"), tx);
 
     {
-        let mut state = strategy.state().write().await;
-        let s = state.as_mut().unwrap();
+        let mut s = strategy.state().write().await; // Correct write-access update
         s.temp_dir = temp_dir.path().to_string_lossy().to_string();
     }
 

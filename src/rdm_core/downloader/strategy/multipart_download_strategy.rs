@@ -21,7 +21,7 @@ const MAX_CONNECTIONS: usize = 8;
 const MIN_PIECE_SIZE: i64 = 256 * 1024;
 
 pub struct MultipartDownloadStrategy {
-    state: Arc<RwLock<Option<DownloaderState>>>,
+    state: Arc<RwLock<DownloaderState>>,
     pieces: Arc<RwLock<HashMap<String, Piece>>>,
     client: Arc<Client>,
     cancel_token: CancellationToken,
@@ -39,7 +39,7 @@ impl MultipartDownloadStrategy {
         let output_path_str = output_path.to_string_lossy().to_string();
 
         Self {
-            state: Arc::new(RwLock::new(Some(DownloaderState {
+            state: Arc::new(RwLock::new(DownloaderState {
                 id,
                 url,
                 output_path: Some(output_path_str),
@@ -54,7 +54,7 @@ impl MultipartDownloadStrategy {
                 resumable: false,
                 attachment_name: None,
                 content_type: None,
-            }))),
+            })),
             pieces: Arc::new(RwLock::new(HashMap::new())),
             // Tuned HTTP client: connection pool, timeouts, TCP optimizations
             client: Arc::new(
@@ -71,13 +71,13 @@ impl MultipartDownloadStrategy {
     }
 
     /// Returns the temp directory path from the current state, if available.
-    pub async fn temp_dir(&self) -> Option<String> {
+    pub async fn temp_dir(&self) -> String {
         let state = self.state.read().await;
-        state.as_ref().map(|s| s.temp_dir.clone())
+        state.temp_dir.clone()
     }
 
     /// Returns a reference to the internal state lock (for testing/inspection).
-    pub fn state(&self) -> &Arc<RwLock<Option<DownloaderState>>> {
+    pub fn state(&self) -> &Arc<RwLock<DownloaderState>> {
         &self.state
     }
 
@@ -97,7 +97,7 @@ impl MultipartDownloadStrategy {
 /// Starts with a single piece covering the entire file, then repeatedly
 /// splits the largest piece in half until we reach `max_connections` pieces
 /// or every piece is at the minimum size.
-pub fn create_pieces(file_size: u64, max_connections: usize) -> Vec<Piece> {
+fn create_pieces(file_size: u64, max_connections: usize) -> Vec<Piece> {
     // Start with one piece covering the whole file
     let mut pieces = vec![Piece::new(
         Uuid::new_v4().to_string(),
@@ -143,10 +143,9 @@ pub fn create_pieces(file_size: u64, max_connections: usize) -> Vec<Piece> {
 /// Extracts HeaderData from the current DownloaderState.
 /// Acquires the read lock once and copies all needed fields.
 async fn build_header_data(
-    state: &Arc<RwLock<Option<DownloaderState>>>,
+    state: &Arc<RwLock<DownloaderState>>,
 ) -> Result<HeaderData, DownloadError> {
-    let state_guard = state.read().await;
-    let s = state_guard.as_ref().ok_or(DownloadError::InvalidState)?;
+    let s = state.read().await;
     Ok(HeaderData {
         url: s.url.clone(),
         headers: s.headers.clone(),
@@ -173,8 +172,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
 
         // 4. Update state with probe results (move fields, don't clone)
         let temp_dir_path = {
-            let mut state = self.state.write().await;
-            let s = state.as_mut().ok_or(DownloadError::InvalidState)?;
+            let mut s = self.state.write().await;
             s.file_size = resource_size.map(|sz| sz as i64).unwrap_or(-1);
             s.url = probe.final_uri;        // move
             s.last_modified = probe.last_modified;  // move
@@ -221,8 +219,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         let header_data = Arc::new(build_header_data(&self.state).await?);
 
         let temp_dir = {
-            let state = self.state.read().await;
-            let s = state.as_ref().ok_or(DownloadError::InvalidState)?;
+            let s = self.state.read().await;
             PathBuf::from(&s.temp_dir)
         };
 
@@ -342,7 +339,6 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         let (piece_ids, temp_dir, output_file) = {
             let pieces = self.pieces.read().await;
             let state = self.state.read().await;
-            let state = state.as_ref().ok_or(DownloadError::InvalidState)?;
 
             // Verify all pieces are finished
             for piece in pieces.values() {
@@ -380,7 +376,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
                 let piece_path = PathBuf::from(&temp_dir).join(piece_id);
                 let mut input = File::open(&piece_path)?;
                 // Use std::io::copy — on Linux it uses copy_file_range(2) for
-                // zero-copy kernel-side transfer. On macOS it uses an optimized
+                // zero-copy kernel-side transfer. On macOS, it uses an optimized
                 // internal buffer. Much better than manual 64KB buffer loops.
                 std::io::copy(&mut input, &mut output)?;
             }

@@ -214,9 +214,8 @@ async fn test_http_downloader_stop_during_download() {
     );
 
     // Cleanup
-    if let Some(temp_dir) = strategy.temp_dir().await {
-        let _ = std::fs::remove_dir_all(&temp_dir);
-    }
+    let temp_dir = strategy.temp_dir().await;
+    let _ = std::fs::remove_dir_all(&temp_dir);
     let _ = std::fs::remove_file("stoptest.bin");
 }
 
