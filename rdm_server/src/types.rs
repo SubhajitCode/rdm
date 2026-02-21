@@ -12,7 +12,7 @@ pub struct ExtensionData {
     pub mine_type: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoListItem {
     pub id: String,
     pub text: String,

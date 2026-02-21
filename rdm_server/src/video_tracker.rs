@@ -7,6 +7,12 @@ pub struct VideoTracker {
 }
 
 impl VideoTracker {
+    pub fn new() -> Self {
+        Self {
+            videos: HashMap::new(),
+        }
+    }
+
     pub fn add_or_update(&mut self, item: VideoListItem) {
         self.videos.insert(item.id.clone(), item);
     }
