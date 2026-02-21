@@ -1,0 +1,22 @@
+[package]
+name = "rdm_core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+futures       = "0.3.31"
+tokio         = { version = "1.49.0", features = ["rt-multi-thread", "macros", "time", "fs", "io-util"] }
+serde         = { version = "1.0.228", features = ["derive"] }
+thiserror     = "2.0.18"
+reqwest       = { version = "0.13.2", features = ["stream"] }
+base64        = "0.22.1"
+tokio-util    = "0.7.18"
+uuid          = { version = "1.21.0", features = ["v4"] }
+async-trait   = "0.1.89"
+log           = "0.4.29"
+
+[dev-dependencies]
+wiremock  = "0.6"
+tempfile  = "3"
+tokio     = { version = "1.49.0", features = ["rt-multi-thread", "macros", "time", "fs", "io-util"] }
+uuid      = { version = "1.21.0", features = ["v4"] }

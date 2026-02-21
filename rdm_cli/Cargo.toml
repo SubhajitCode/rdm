@@ -1,0 +1,14 @@
+[package]
+name = "rdm_cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rdm"
+path = "src/main.rs"
+
+[dependencies]
+rdm_core    = { path = "../rdm_core" }
+clap        = { version = "4.5.58", features = ["derive"] }
+tokio       = { version = "1.49.0", features = ["rt-multi-thread", "macros"] }
+env_logger  = "0.11.9"

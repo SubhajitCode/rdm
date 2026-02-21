@@ -1,0 +1,9 @@
+[package]
+name = "rdm_server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rdm_core  = { path = "../rdm_core" }
+serde     = { version = "1.0.228", features = ["derive"] }
+log       = "0.4.29"
