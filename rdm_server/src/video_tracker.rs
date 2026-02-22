@@ -45,4 +45,18 @@ impl VideoTracker {
     pub fn remove(&mut self, id: &str) -> Option<VideoListItem> {
         self.videos.remove(id)
     }
+
+    /// Update the `text` (title) of any video whose `tab_id` matches the
+    /// given tab URL.  Called when the extension reports a tab-title change.
+    pub fn update_title_for_tab(&mut self, tab_url: &str, new_title: &str) {
+        for item in self.videos.values_mut() {
+            if item.tab_id == tab_url {
+                item.text = new_title.to_string();
+                info!(
+                    "VideoTracker::update_title_for_tab: id={} new_title={}",
+                    item.id, new_title
+                );
+            }
+        }
+    }
 }

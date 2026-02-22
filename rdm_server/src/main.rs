@@ -5,7 +5,7 @@ async fn main() {
     env_logger::init();
 
     let host = std::env::var("RDM_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let port = std::env::var("RDM_PORT").unwrap_or_else(|_| "9614".to_string());
+    let port = std::env::var("RDM_PORT").unwrap_or_else(|_| "8597".to_string());
     let addr = format!("{}:{}", host, port);
 
     let state = AppState::new();
@@ -15,7 +15,7 @@ async fn main() {
         .await
         .expect("failed to bind address");
 
-    log::info!("rdmd listening on http://{}", addr);
+    log::info!("rdmd listening on http://{}  (set RDM_PORT to override)", addr);
     axum::serve(listener, app)
         .await
         .expect("server error");
