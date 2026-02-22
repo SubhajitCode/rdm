@@ -1,0 +1,46 @@
+{
+  "appName": {
+    "message": "rdm Integration",
+    "description": "Name of this extension"
+  },
+  "appDescription": {
+    "message": "Intercept and accelerate downloads with rdm (Rust Download Manager).",
+    "description": "Short description shown in the Chrome Web Store"
+  },
+  "monitoringLabel": {
+    "message": "Browser monitoring",
+    "description": "Label for the monitoring toggle in the popup"
+  },
+  "clearBtn": {
+    "message": "Clear",
+    "description": "Button to clear the detected video list"
+  },
+  "moreFormatsBtn": {
+    "message": "More formats",
+    "description": "Button to request additional video formats"
+  },
+  "downloadWithRdm": {
+    "message": "Download with rdm",
+    "description": "Context menu item for links/video/audio"
+  },
+  "downloadImageWithRdm": {
+    "message": "Download Image with rdm",
+    "description": "Context menu item for images"
+  },
+  "errorNotRunning": {
+    "message": "rdm is not running. Start it to enable browser integration.",
+    "description": "Message shown when the rdm server cannot be reached"
+  },
+  "launchRdm": {
+    "message": "Launch rdm",
+    "description": "Button to launch the rdm application"
+  },
+  "disabledTitle": {
+    "message": "Browser monitoring is disabled.",
+    "description": "Heading shown in the disabled popup"
+  },
+  "disabledHint": {
+    "message": "Enable it from the rdm application settings to start intercepting downloads.",
+    "description": "Hint text in the disabled popup"
+  }
+}
