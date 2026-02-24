@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -477,7 +477,7 @@ impl MultipartDownloadStrategyBuilder {
         self
     }
 
-    pub fn with_attachment_name(mut self, name: String) -> Self {
+    pub fn with_attachment_name(self, name: String) -> Self {
         {
             let mut state = self.strategy.state.blocking_write();
             state.attachment_name = Some(name);
@@ -485,7 +485,7 @@ impl MultipartDownloadStrategyBuilder {
         self
     }
 
-    pub fn with_content_type(mut self, content_type: String) -> Self {
+    pub fn with_content_type(self, content_type: String) -> Self {
         {
             let mut state = self.strategy.state.blocking_write();
             state.content_type = Some(content_type);

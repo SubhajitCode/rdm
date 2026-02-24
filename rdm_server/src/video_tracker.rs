@@ -17,19 +17,15 @@ impl VideoTracker {
         self.videos.insert(item.id.clone(), item);
     }
 
-    pub fn trigger_download(&self, id: &str) -> Result<String, String> {
-        let video_item = self.videos.get(id);
-        match video_item {
+    pub fn trigger_download(&self, id: &str) -> Result<VideoListItem, String> {
+        match self.videos.get(id) {
             Some(item) => {
-                info!("VideoTracker::trigger_download: id={} ", item.id);
-                Ok("triggered Download".to_string())
+                info!("VideoTracker::trigger_download: id={}", item.id);
+                Ok(item.clone())
             }
             None => {
-                error!("VideoTracker::Failed to trigger_download: id={} ", id);
-                Err(format!(
-                    "VideoTracker::trigger_download: video id {} not found",
-                    id
-                ))
+                error!("VideoTracker::trigger_download: video id {} not found", id);
+                Err(format!("video id {} not found", id))
             }
         }
     }

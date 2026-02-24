@@ -73,15 +73,40 @@ pub struct VidRequest {
 // ---------------------------------------------------------------------------
 
 /// A detected streaming video tracked in memory.
+/// All fields needed to initiate the download are stored here so that
+/// the server can act on a /vid request without contacting the extension again.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoListItem {
     pub id: String,
     /// Human-readable title (typically the tab title).
     pub text: String,
-    /// Extra info shown in the popup (e.g. resolution, file size).
+    /// Extra info shown in the popup (Content-Type, e.g. "video/mp4").
     pub info: String,
     #[serde(rename = "tabId")]
     pub tab_id: String,
+
+    // ── Download data ─────────────────────────────────────────────────────────
+    /// The media URL to download.
+    pub url: String,
+    /// Cookie string extracted from the original request headers.
+    #[serde(default)]
+    pub cookie: String,
+    /// Request headers captured by the extension (e.g. User-Agent, Referer).
+    #[serde(default, rename = "requestHeaders")]
+    pub request_headers: HashMap<String, serde_json::Value>,
+    /// Response headers captured by the extension (e.g. Content-Type, Content-Length).
+    #[serde(default, rename = "responseHeaders")]
+    pub response_headers: HashMap<String, serde_json::Value>,
+    /// HTTP method (usually GET).
+    pub method: Option<String>,
+    /// User-Agent string from the browser.
+    #[serde(rename = "userAgent")]
+    pub user_agent: Option<String>,
+    /// URL of the tab that triggered this media request.
+    #[serde(rename = "tabUrl")]
+    pub tab_url: Option<String>,
+    /// Referer header value, if present in request headers.
+    pub referer: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

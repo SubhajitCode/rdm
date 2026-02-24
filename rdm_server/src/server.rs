@@ -116,11 +116,29 @@ async fn media_handler(
 
     // Build a VideoListItem and store it.
     let id = uuid_from_url(&data.url);
+
+    // Extract Referer from request headers if present.
+    let referer = data.request_headers
+        .get("Referer")
+        .or_else(|| data.request_headers.get("referer"))
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     let item = VideoListItem {
-        id:     id.clone(),
-        text:   title,
-        info:   content_type,
-        tab_id: data.tab_id.unwrap_or_default(),
+        id:               id.clone(),
+        text:             title,
+        info:             content_type,
+        tab_id:           data.tab_id.clone().unwrap_or_default(),
+        url:              data.url.clone(),
+        cookie:           data.cookie.clone(),
+        request_headers:  data.request_headers.clone(),
+        response_headers: data.response_headers.clone(),
+        method:           data.method.clone(),
+        user_agent:       data.user_agent.clone(),
+        tab_url:          data.tab_url.clone(),
+        referer,
     };
 
     {
@@ -199,7 +217,21 @@ async fn vid_handler(
     };
 
     match result {
-        Ok(msg)  => log::info!("[vid] {}", msg),
+        Ok(item) => {
+            log::info!(
+                "[vid] triggering download  id=\"{}\"  url=\"{}\"  file=\"{}\"  mime=\"{}\"  cookie=\"{}\"  user_agent=\"{}\"  referer=\"{}\"  tab_url=\"{}\"  method=\"{}\"",
+                item.id,
+                item.url,
+                item.text,
+                item.info,
+                item.cookie,
+                item.user_agent.as_deref().unwrap_or("-"),
+                item.referer.as_deref().unwrap_or("-"),
+                item.tab_url.as_deref().unwrap_or("-"),
+                item.method.as_deref().unwrap_or("GET"),
+            );
+            // TODO: enqueue into rdm_core::HttpDownloader using item fields
+        }
         Err(err) => log::warn!("[vid] {}", err),
     }
 
