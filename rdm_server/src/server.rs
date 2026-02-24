@@ -53,6 +53,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/videos",      get(videos_handler))
         .route("/videos/{id}", post(add_video_handler))
         .route("/videos/{id}", delete(remove_video_handler))
+        .route("/echo/{msg}",get(echo_handler))
         .layer(cors)
         .with_state(state)
 }
@@ -267,6 +268,13 @@ async fn remove_video_handler(
     tracker.remove(&id);
     log::info!("video removed: id={}", id);
     Json(serde_json::json!({ "status": "ok" }))
+}
+
+async fn echo_handler(
+    State(_state): State<Arc<AppState>>,
+    Path(msg): Path<String>,
+)  {
+    log::info!("echo {}",msg );
 }
 
 // ---------------------------------------------------------------------------

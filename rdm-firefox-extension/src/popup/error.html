@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>rdm — Not Running</title>
+  <link rel="stylesheet" href="popup.css">
+  <style>
+    .error-state {
+      padding: 20px 16px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+      text-align: center;
+    }
+    .error-icon {
+      font-size: 32px;
+      line-height: 1;
+    }
+    .error-message {
+      font-size: 13px;
+      color: #5f6368;
+      line-height: 1.5;
+    }
+    .primary-btn {
+      width: 100%;
+      padding: 9px 16px;
+      background: #1a73e8;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .primary-btn:hover {
+      background: #1558b0;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="header-logo">rdm</span>
+    <span class="header-title">Integration</span>
+  </header>
+
+  <main class="error-state">
+    <div class="error-icon" aria-hidden="true">&#9888;</div>
+    <p class="error-message">
+      <strong>rdm is not running.</strong><br>
+      Start the rdm application to enable browser integration.
+    </p>
+    <button id="btn-launch" class="primary-btn">Launch rdm</button>
+  </main>
+
+  <script src="error.js"></script>
+</body>
+</html>

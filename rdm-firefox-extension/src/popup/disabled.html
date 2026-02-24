@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>rdm — Monitoring Disabled</title>
+  <link rel="stylesheet" href="popup.css">
+  <style>
+    .disabled-state {
+      padding: 20px 16px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      text-align: center;
+    }
+    .disabled-icon {
+      font-size: 28px;
+      line-height: 1;
+      color: #80868b;
+    }
+    .disabled-state p {
+      font-size: 13px;
+      color: #5f6368;
+      line-height: 1.5;
+    }
+    .disabled-state .hint {
+      font-size: 12px;
+      color: #80868b;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="header-logo">rdm</span>
+    <span class="header-title">Integration</span>
+  </header>
+
+  <main class="disabled-state">
+    <div class="disabled-icon" aria-hidden="true">&#128683;</div>
+    <p><strong>Browser monitoring is disabled.</strong></p>
+    <p class="hint">
+      Enable it from the rdm application settings to start intercepting downloads.
+    </p>
+  </main>
+</body>
+</html>

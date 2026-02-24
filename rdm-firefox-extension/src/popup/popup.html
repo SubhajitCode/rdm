@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>rdm Integration</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <span class="header-logo">rdm</span>
+    <span class="header-title">Integration</span>
+  </header>
+
+  <!-- Detected streaming videos (hidden when list is empty) -->
+  <section id="video-section" hidden>
+    <div id="video-list"></div>
+    <div class="action-row">
+      <button id="btn-more-formats" class="flat-btn">More formats</button>
+      <button id="btn-clear" class="flat-btn">Clear</button>
+    </div>
+  </section>
+
+  <!-- Empty state (shown when no videos detected) -->
+  <div id="empty-state" class="empty-state">
+    <p>No videos detected yet.</p>
+    <p class="muted">Browse to a page with video to start capturing.</p>
+  </div>
+
+  <!-- Footer: monitoring toggle -->
+  <footer>
+    <label class="toggle-label" for="chk-monitoring">
+      <span class="toggle-wrap">
+        <input type="checkbox" id="chk-monitoring" role="switch">
+        <span class="toggle-track" aria-hidden="true">
+          <span class="toggle-thumb"></span>
+        </span>
+      </span>
+      Browser monitoring
+    </label>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>
