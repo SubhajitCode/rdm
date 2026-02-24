@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -10,9 +10,7 @@ use uuid::Uuid;
 
 use crate::downloader::piece_grabber::{download_piece, probe_url};
 use crate::downloader::strategy::download_strategy::DownloadStrategy;
-use crate::types::types::{
-    DownloadError, DownloaderState, HeaderData, Piece, ProgressEvent, SegmentState,
-};
+use crate::types::types::{AuthenticationInfo, DownloadError, DownloaderState, HeaderData, Piece, ProgressEvent, ProxyInfo, SegmentState};
 
 /// Default maximum number of concurrent download connections.
 const MAX_CONNECTIONS: usize = 8;
@@ -26,6 +24,10 @@ pub struct MultipartDownloadStrategy {
     client: Arc<Client>,
     cancel_token: CancellationToken,
     progress_tx: mpsc::Sender<ProgressEvent>,
+}
+pub struct MultipartDownloadStrategyBuilder{
+    strategy: MultipartDownloadStrategy,
+    event_receiver: mpsc::Receiver<ProgressEvent>,
 }
 
 impl MultipartDownloadStrategy {
@@ -68,6 +70,10 @@ impl MultipartDownloadStrategy {
             cancel_token: CancellationToken::new(),
             progress_tx,
         }
+    }
+
+    pub fn builder(url:String,path:PathBuf) -> MultipartDownloadStrategyBuilder {
+        MultipartDownloadStrategyBuilder::new(url,path)
     }
 
     /// Returns the temp directory path from the current state, if available.
@@ -397,5 +403,97 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         .map_err(DownloadError::Disk)?;
 
         Ok(())
+    }
+}
+impl MultipartDownloadStrategyBuilder {
+    pub fn new(url: String, path: PathBuf) -> Self {
+        let (progress_tx, progress_rx) = mpsc::channel(256);
+        let strategy = MultipartDownloadStrategy::new(url, path, progress_tx);
+        Self {
+            strategy,
+            event_receiver: progress_rx,
+        }
+    }
+
+    pub fn with_cookies(self, cookies: String) -> Self {
+        {
+            let mut state = self.strategy.state.blocking_write();
+            state.cookies = Some(cookies);
+        }
+        self
+    }
+
+    pub fn with_headers(self, headers: HashMap<String, Vec<String>>) -> Self {
+        {
+            let mut state = self.strategy.state.blocking_write();
+            state.headers = headers;
+        }
+        self
+    }
+
+    pub fn add_header<K, V>(self, key: K, value: V) -> Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+    {
+        {
+            let mut state = self.strategy.state.blocking_write();
+            let key = key.into();
+            let value = value.into();
+            state.headers.entry(key).or_insert_with(Vec::new).push(value);
+        }
+        self
+    }
+
+    pub fn with_authentication(self, auth: AuthenticationInfo) -> Self {
+        {
+            let mut state = self.strategy.state.blocking_write();
+            state.authentication = Some(auth);
+        }
+        self
+    }
+
+    pub fn with_proxy(self, proxy: ProxyInfo) -> Self {
+        {
+            let mut state = self.strategy.state.blocking_write();
+            state.proxy = Some(proxy);
+        }
+        self
+    }
+
+    pub fn with_convert_to_mp3(self, convert: bool) -> Self {
+        {
+            let mut state = self.strategy.state.blocking_write();
+            state.convert_to_mp3 = convert;
+        }
+        self
+    }
+
+    pub fn with_last_modified(self, last_modified: String) -> Self {
+        {
+            let mut state = self.strategy.state.blocking_write();
+            state.last_modified = Some(last_modified);
+        }
+        self
+    }
+
+    pub fn with_attachment_name(mut self, name: String) -> Self {
+        {
+            let mut state = self.strategy.state.blocking_write();
+            state.attachment_name = Some(name);
+        }
+        self
+    }
+
+    pub fn with_content_type(mut self, content_type: String) -> Self {
+        {
+            let mut state = self.strategy.state.blocking_write();
+            state.content_type = Some(content_type);
+        }
+        self
+    }
+
+    pub fn build(self) -> (MultipartDownloadStrategy, mpsc::Receiver<ProgressEvent>) {
+        (self.strategy, self.event_receiver)
     }
 }
