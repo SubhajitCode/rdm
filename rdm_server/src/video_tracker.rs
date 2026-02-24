@@ -17,6 +17,8 @@ impl VideoTracker {
         self.videos.insert(item.id.clone(), item);
     }
 
+    /// Look up a video by `id` and return a clone of its data.
+    /// The caller is responsible for dispatching the actual download.
     pub fn trigger_download(&self, id: &str) -> Result<VideoListItem, String> {
         match self.videos.get(id) {
             Some(item) => {

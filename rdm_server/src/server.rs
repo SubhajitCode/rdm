@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -7,10 +9,37 @@ use axum::{Json, Router};
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 
+use rdm_core::downloader::http_downloader::HttpDownloader;
+use rdm_core::downloader::strategy::multipart_download_strategy::MultipartDownloadStrategy;
+
+use crate::path_sanitizer::safe_output_path;
 use crate::types::{
     ExtensionData, MediaData, SyncConfig, TabUpdateData, VideoListItem, VidRequest,
 };
 use crate::video_tracker::VideoTracker;
+
+// ---------------------------------------------------------------------------
+// Download tracking
+// ---------------------------------------------------------------------------
+
+/// Status of an active or completed download.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DownloadStatus {
+    Running,
+    Complete,
+    Failed,
+    Cancelled,
+}
+
+/// Entry stored in `AppState::downloads` for every dispatched download.
+pub struct ActiveDownload {
+    pub id:          String,
+    pub url:         String,
+    pub output_path: PathBuf,
+    pub downloader:  Arc<HttpDownloader>,
+    pub status:      DownloadStatus,
+}
 
 // ---------------------------------------------------------------------------
 // Shared application state
@@ -18,12 +47,15 @@ use crate::video_tracker::VideoTracker;
 
 pub struct AppState {
     pub video_tracker: Arc<RwLock<VideoTracker>>,
+    /// Active and recently completed downloads, keyed by video id.
+    pub downloads: Arc<RwLock<HashMap<String, ActiveDownload>>>,
 }
 
 impl AppState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             video_tracker: Arc::new(RwLock::new(VideoTracker::new())),
+            downloads:     Arc::new(RwLock::new(HashMap::new())),
         })
     }
 }
@@ -230,12 +262,129 @@ async fn vid_handler(
                 item.tab_url.as_deref().unwrap_or("-"),
                 item.method.as_deref().unwrap_or("GET"),
             );
-            // TODO: enqueue into rdm_core::HttpDownloader using item fields
+            spawn_download(item, Arc::clone(&state));
         }
         Err(err) => log::warn!("[vid] {}", err),
     }
 
     Json(sync_config(&state).await)
+}
+
+/// Spawn a download task for the given `VideoListItem`.
+/// The task runs in the background; the server response is not blocked.
+/// The `state` is used to register and update the download's status.
+fn spawn_download(item: VideoListItem, state: Arc<AppState>) {
+    // Determine a safe output path.
+    let output_path = safe_output_path(&item.text, &item.url);
+    log::info!("[vid] output_path={:?}", output_path);
+
+    // Convert request headers: HashMap<String, serde_json::Value (array)>
+    // → HashMap<String, Vec<String>> as expected by the builder.
+    let req_headers = json_headers_to_vec(&item.request_headers);
+
+    // Build the strategy via the builder.
+    let builder = MultipartDownloadStrategy::builder(item.url.clone(), output_path.clone())
+        .with_headers(req_headers);
+
+    // Set cookies if present.
+    let builder = if !item.cookie.is_empty() {
+        builder.with_cookies(item.cookie.clone())
+    } else {
+        builder
+    };
+
+    // Inject User-Agent as an explicit header if provided and not already set.
+    let builder = if let Some(ua) = &item.user_agent {
+        builder.add_header("User-Agent", ua.clone())
+    } else {
+        builder
+    };
+
+    // Inject Referer as an explicit header if provided and not already set.
+    let builder = if let Some(referer) = &item.referer {
+        builder.add_header("Referer", referer.clone())
+    } else {
+        builder
+    };
+
+    let (strategy, mut progress_rx) = builder.build();
+    let downloader = Arc::new(HttpDownloader::new(Arc::new(strategy)));
+
+    // Register the download in the shared map before spawning.
+    let download_id = item.id.clone();
+    let download_url = item.url.clone();
+    {
+        let state_clone = Arc::clone(&state);
+        let dl = ActiveDownload {
+            id:          download_id.clone(),
+            url:         download_url.clone(),
+            output_path: output_path.clone(),
+            downloader:  Arc::clone(&downloader),
+            status:      DownloadStatus::Running,
+        };
+        tokio::spawn(async move {
+            state_clone.downloads.write().await.insert(dl.id.clone(), dl);
+        });
+    }
+
+    // Spawn the actual download; update status when done.
+    let downloader_clone = Arc::clone(&downloader);
+    let state_for_done  = Arc::clone(&state);
+    let id_for_done     = download_id.clone();
+    let url_for_log     = download_url.clone();
+    tokio::spawn(async move {
+        let result = downloader_clone.download().await;
+        let new_status = match &result {
+            Ok(())  => {
+                log::info!("[vid] download complete  url=\"{}\"  path={:?}", url_for_log, output_path);
+                DownloadStatus::Complete
+            }
+            Err(e) => {
+                log::error!("[vid] download failed  url=\"{}\"  err={:?}", url_for_log, e);
+                DownloadStatus::Failed
+            }
+        };
+        // Update status in the map.
+        if let Some(entry) = state_for_done.downloads.write().await.get_mut(&id_for_done) {
+            entry.status = new_status;
+        }
+    });
+
+    // Drain progress events so the channel doesn't back-pressure the downloader.
+    tokio::spawn(async move {
+        while let Some(ev) = progress_rx.recv().await {
+            log::debug!(
+                "[vid] progress  piece={}  bytes={}",
+                ev.piece_id,
+                ev.bytes_downloaded,
+            );
+        }
+    });
+}
+
+/// Convert the extension's header map (values are `serde_json::Value` arrays)
+/// into the `HashMap<String, Vec<String>>` expected by the builder.
+fn json_headers_to_vec(
+    headers: &HashMap<String, serde_json::Value>,
+) -> HashMap<String, Vec<String>> {
+    headers
+        .iter()
+        .filter_map(|(k, v)| {
+            let values: Vec<String> = match v {
+                serde_json::Value::Array(arr) => arr
+                    .iter()
+                    .filter_map(|val| val.as_str().map(str::to_string))
+                    .collect(),
+                serde_json::Value::String(s) => vec![s.clone()],
+                _ => return None,
+            };
+            if values.is_empty() {
+                None
+            } else {
+                Some((k.clone(), values))
+            }
+        })
+        .collect()
 }
 
 /// POST /clear
@@ -255,20 +404,43 @@ async fn clear_handler(State(state): State<Arc<AppState>>) -> Json<SyncConfig> {
 
 /// GET /status/:id
 async fn status_handler(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
-    log::info!("status requested for id={}", id);
-    Json(serde_json::json!({ "id": id, "status": "unknown" }))
+    let downloads = state.downloads.read().await;
+    if let Some(dl) = downloads.get(&id) {
+        Json(serde_json::json!({
+            "id":          dl.id,
+            "url":         dl.url,
+            "output_path": dl.output_path.to_string_lossy(),
+            "status":      dl.status,
+        }))
+    } else {
+        Json(serde_json::json!({ "id": id, "status": "not_found" }))
+    }
 }
 
 /// POST /cancel/:id
 async fn cancel_handler(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
-    log::info!("cancel requested for id={}", id);
-    Json(serde_json::json!({ "id": id, "status": "cancelled" }))
+    let mut downloads = state.downloads.write().await;
+    if let Some(dl) = downloads.get_mut(&id) {
+        match dl.downloader.stop().await {
+            Ok(()) => {
+                dl.status = DownloadStatus::Cancelled;
+                log::info!("[cancel] id={} cancelled", id);
+                Json(serde_json::json!({ "id": id, "status": "cancelled" }))
+            }
+            Err(e) => {
+                log::warn!("[cancel] id={} stop error: {:?}", id, e);
+                Json(serde_json::json!({ "id": id, "status": "error", "detail": format!("{:?}", e) }))
+            }
+        }
+    } else {
+        Json(serde_json::json!({ "id": id, "status": "not_found" }))
+    }
 }
 
 /// GET /videos

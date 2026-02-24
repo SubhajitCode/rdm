@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -19,7 +19,7 @@ const MAX_CONNECTIONS: usize = 8;
 const MIN_PIECE_SIZE: i64 = 256 * 1024;
 
 pub struct MultipartDownloadStrategy {
-    state: Arc<RwLock<DownloaderState>>,
+    state: Arc<StdRwLock<DownloaderState>>,
     pieces: Arc<RwLock<HashMap<String, Piece>>>,
     client: Arc<Client>,
     cancel_token: CancellationToken,
@@ -41,7 +41,7 @@ impl MultipartDownloadStrategy {
         let output_path_str = output_path.to_string_lossy().to_string();
 
         Self {
-            state: Arc::new(RwLock::new(DownloaderState {
+            state: Arc::new(StdRwLock::new(DownloaderState {
                 id,
                 url,
                 output_path: Some(output_path_str),
@@ -78,12 +78,12 @@ impl MultipartDownloadStrategy {
 
     /// Returns the temp directory path from the current state, if available.
     pub async fn temp_dir(&self) -> String {
-        let state = self.state.read().await;
+        let state = self.state.read().unwrap();
         state.temp_dir.clone()
     }
 
     /// Returns a reference to the internal state lock (for testing/inspection).
-    pub fn state(&self) -> &Arc<RwLock<DownloaderState>> {
+    pub fn state(&self) -> &Arc<StdRwLock<DownloaderState>> {
         &self.state
     }
 
@@ -148,10 +148,10 @@ fn create_pieces(file_size: u64, max_connections: usize) -> Vec<Piece> {
 
 /// Extracts HeaderData from the current DownloaderState.
 /// Acquires the read lock once and copies all needed fields.
-async fn build_header_data(
-    state: &Arc<RwLock<DownloaderState>>,
+fn build_header_data(
+    state: &Arc<StdRwLock<DownloaderState>>,
 ) -> Result<HeaderData, DownloadError> {
-    let s = state.read().await;
+    let s = state.read().unwrap();
     Ok(HeaderData {
         url: s.url.clone(),
         headers: s.headers.clone(),
@@ -166,8 +166,8 @@ impl DownloadStrategy for MultipartDownloadStrategy {
     /// Probes the URL, determines file size and resumability, creates temp
     /// directory, and splits the file into download pieces.
     async fn preprocess(&self) -> Result<(), DownloadError> {
-        // 1. Build HeaderData from current state
-        let header_data = build_header_data(&self.state).await?;
+        // 1. Build HeaderData from current state (sync lock)
+        let header_data = build_header_data(&self.state)?;
 
         // 2. Probe the URL
         let probe = probe_url(&self.client, &header_data).await?;
@@ -176,15 +176,15 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         let resumable = probe.resumable;
         let resource_size = probe.resource_size;
 
-        // 4. Update state with probe results (move fields, don't clone)
+        // 4. Update state with probe results (sync lock — no await while held)
         let temp_dir_path = {
-            let mut s = self.state.write().await;
+            let mut s = self.state.write().unwrap();
             s.file_size = resource_size.map(|sz| sz as i64).unwrap_or(-1);
-            s.url = probe.final_uri;           // move
-            s.last_modified = probe.last_modified;   // move
+            s.url = probe.final_uri;
+            s.last_modified = probe.last_modified;
             s.resumable = resumable;
-            s.attachment_name = probe.attachment_name;   // move
-            s.content_type = probe.content_type;   // move
+            s.attachment_name = probe.attachment_name;
+            s.content_type = probe.content_type;
             s.temp_dir.clone()
         };
 
@@ -198,11 +198,9 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             if let Some(file_size) = resource_size {
                 create_pieces(file_size, MAX_CONNECTIONS)
             } else {
-                // Resumable but unknown size — single piece, open-ended
                 vec![Piece::new(Uuid::new_v4().to_string(), 0, -1)]
             }
         } else {
-            // Non-resumable — single piece, download everything
             vec![Piece::new(Uuid::new_v4().to_string(), 0, -1)]
         };
 
@@ -222,10 +220,10 @@ impl DownloadStrategy for MultipartDownloadStrategy {
     /// tokio task. Waits for all tasks to complete and propagates errors.
     async fn download(&self) -> Result<(), DownloadError> {
         // Wrap HeaderData in Arc — shared across all piece tasks without cloning
-        let header_data = Arc::new(build_header_data(&self.state).await?);
+        let header_data = Arc::new(build_header_data(&self.state)?);
 
         let temp_dir = {
-            let s = self.state.read().await;
+            let s = self.state.read().unwrap();
             PathBuf::from(&s.temp_dir)
         };
 
@@ -344,7 +342,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         // Extract all needed data under locks, then drop them before I/O
         let (piece_ids, temp_dir, output_file) = {
             let pieces = self.pieces.read().await;
-            let state = self.state.read().await;
+            let state = self.state.read().unwrap();
 
             // Verify all pieces are finished
             for piece in pieces.values() {
@@ -417,7 +415,7 @@ impl MultipartDownloadStrategyBuilder {
 
     pub fn with_cookies(self, cookies: String) -> Self {
         {
-            let mut state = self.strategy.state.blocking_write();
+            let mut state = self.strategy.state.write().unwrap();
             state.cookies = Some(cookies);
         }
         self
@@ -425,7 +423,7 @@ impl MultipartDownloadStrategyBuilder {
 
     pub fn with_headers(self, headers: HashMap<String, Vec<String>>) -> Self {
         {
-            let mut state = self.strategy.state.blocking_write();
+            let mut state = self.strategy.state.write().unwrap();
             state.headers = headers;
         }
         self
@@ -437,7 +435,7 @@ impl MultipartDownloadStrategyBuilder {
         V: Into<String>,
     {
         {
-            let mut state = self.strategy.state.blocking_write();
+            let mut state = self.strategy.state.write().unwrap();
             let key = key.into();
             let value = value.into();
             state.headers.entry(key).or_insert_with(Vec::new).push(value);
@@ -447,7 +445,7 @@ impl MultipartDownloadStrategyBuilder {
 
     pub fn with_authentication(self, auth: AuthenticationInfo) -> Self {
         {
-            let mut state = self.strategy.state.blocking_write();
+            let mut state = self.strategy.state.write().unwrap();
             state.authentication = Some(auth);
         }
         self
@@ -455,7 +453,7 @@ impl MultipartDownloadStrategyBuilder {
 
     pub fn with_proxy(self, proxy: ProxyInfo) -> Self {
         {
-            let mut state = self.strategy.state.blocking_write();
+            let mut state = self.strategy.state.write().unwrap();
             state.proxy = Some(proxy);
         }
         self
@@ -463,7 +461,7 @@ impl MultipartDownloadStrategyBuilder {
 
     pub fn with_convert_to_mp3(self, convert: bool) -> Self {
         {
-            let mut state = self.strategy.state.blocking_write();
+            let mut state = self.strategy.state.write().unwrap();
             state.convert_to_mp3 = convert;
         }
         self
@@ -471,7 +469,7 @@ impl MultipartDownloadStrategyBuilder {
 
     pub fn with_last_modified(self, last_modified: String) -> Self {
         {
-            let mut state = self.strategy.state.blocking_write();
+            let mut state = self.strategy.state.write().unwrap();
             state.last_modified = Some(last_modified);
         }
         self
@@ -479,7 +477,7 @@ impl MultipartDownloadStrategyBuilder {
 
     pub fn with_attachment_name(self, name: String) -> Self {
         {
-            let mut state = self.strategy.state.blocking_write();
+            let mut state = self.strategy.state.write().unwrap();
             state.attachment_name = Some(name);
         }
         self
@@ -487,7 +485,7 @@ impl MultipartDownloadStrategyBuilder {
 
     pub fn with_content_type(self, content_type: String) -> Self {
         {
-            let mut state = self.strategy.state.blocking_write();
+            let mut state = self.strategy.state.write().unwrap();
             state.content_type = Some(content_type);
         }
         self

@@ -75,7 +75,7 @@ async fn test_preprocess_resumable_creates_multiple_pieces() {
     strategy.preprocess().await.unwrap();
 
     {
-        let state_lock = strategy.state().write().await;
+        let state_lock = strategy.state().write().unwrap();
         let s = &*state_lock;
         assert!(s.resumable);
         assert!(s.file_size > 0);
@@ -103,7 +103,7 @@ async fn test_preprocess_resumable_creates_multiple_pieces() {
     }
 
     {
-        let state_lock = strategy.state().write().await;
+        let state_lock = strategy.state().write().unwrap();
         let s = &*state_lock;
         assert!(std::path::Path::new(&s.temp_dir).exists());
         let _ = std::fs::remove_dir_all(&s.temp_dir);
@@ -121,7 +121,7 @@ async fn test_preprocess_non_resumable_creates_single_piece() {
     strategy.preprocess().await.unwrap();
 
     {
-        let state_lock = strategy.state().write().await;
+        let state_lock = strategy.state().write().unwrap();
         let s = &*state_lock;
         assert!(!s.resumable);
     }
@@ -135,7 +135,7 @@ async fn test_preprocess_non_resumable_creates_single_piece() {
     }
 
     {
-        let state_lock = strategy.state().write().await;
+        let state_lock = strategy.state().write().unwrap();
         let s = &*state_lock;
         let _ = std::fs::remove_dir_all(&s.temp_dir);
     }
@@ -184,7 +184,7 @@ async fn test_download_writes_all_pieces_to_temp_files() {
     }
 
     {
-        let state_lock = strategy.state().write().await;
+        let state_lock = strategy.state().write().unwrap();
         let s = &*state_lock;
         let temp_dir = std::path::PathBuf::from(&s.temp_dir);
 
@@ -252,7 +252,7 @@ async fn test_postprocess_assembles_pieces_in_order() {
     );
 
     {
-        let mut s = strategy.state().write().await;
+        let mut s = strategy.state().write().unwrap();
         s.temp_dir = temp_dir.path().to_string_lossy().to_string();
     }
 
@@ -320,7 +320,7 @@ async fn test_postprocess_fails_if_piece_not_finished() {
     );
 
     {
-        let mut s = strategy.state().write().await;
+        let mut s = strategy.state().write().unwrap();
         s.temp_dir = temp_dir.path().to_string_lossy().to_string();
     }
 
