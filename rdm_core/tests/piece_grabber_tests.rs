@@ -49,6 +49,37 @@ fn test_extract_filename_missing() {
     assert_eq!(result, None);
 }
 
+#[test]
+fn test_extract_filename_rfc5987_basic() {
+    // RFC 5987 form: filename*=UTF-8''My%20Video.mp4
+    let result = extract_filename("attachment; filename*=UTF-8''My%20Video.mp4");
+    assert_eq!(result, Some("My Video.mp4".to_string()));
+}
+
+#[test]
+fn test_extract_filename_rfc5987_takes_priority() {
+    // When both forms are present, filename* wins
+    let result = extract_filename(
+        "attachment; filename=\"fallback.mp4\"; filename*=UTF-8''Better%20Name.mp4",
+    );
+    assert_eq!(result, Some("Better Name.mp4".to_string()));
+}
+
+#[test]
+fn test_extract_filename_rfc5987_lowercase_charset() {
+    let result = extract_filename("attachment; filename*=utf-8''Report%202024.pdf");
+    assert_eq!(result, Some("Report 2024.pdf".to_string()));
+}
+
+#[test]
+fn test_extract_filename_percent_decoded_unicode() {
+    // "Ünïcödé.zip" percent-encoded as UTF-8
+    let result = extract_filename(
+        "attachment; filename*=UTF-8''%C3%9Cn%C3%AF%63%C3%B6d%C3%A9.zip",
+    );
+    assert_eq!(result, Some("Ünïcödé.zip".to_string()));
+}
+
 // ---------------------------------------------------------------
 // probe_url
 // ---------------------------------------------------------------

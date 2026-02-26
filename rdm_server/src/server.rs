@@ -275,7 +275,10 @@ async fn vid_handler(
 /// The `state` is used to register and update the download's status.
 fn spawn_download(item: VideoListItem, state: Arc<AppState>) {
     // Determine a safe output path.
-    let output_path = safe_output_path(&item.text, &item.url);
+    // `item.info` carries the Content-Type detected by the extension, which
+    // helps supply the correct extension when the tab title has none.
+    let mime = if item.info.is_empty() { None } else { Some(item.info.as_str()) };
+    let output_path = safe_output_path(&item.text, &item.url, mime);
     log::info!("[vid] output_path={:?}", output_path);
 
     // Convert request headers: HashMap<String, serde_json::Value (array)>
@@ -364,12 +367,56 @@ fn spawn_download(item: VideoListItem, state: Arc<AppState>) {
 
 /// Convert the extension's header map (values are `serde_json::Value` arrays)
 /// into the `HashMap<String, Vec<String>>` expected by the builder.
+///
+/// The following headers are intentionally stripped:
+/// - **Hop-by-hop headers** (`Host`, `Connection`, `Keep-Alive`,
+///   `Transfer-Encoding`, `TE`, `Trailer`, `Upgrade`, `Proxy-*`) — these
+///   must never be forwarded to an upstream server per RFC 7230.
+/// - **`Cookie`** — carried separately in `HeaderData.cookies` and emitted
+///   by `apply_headers`; forwarding it here too produces a duplicate `Cookie`
+///   header that many servers reject with 400.
+/// - **`Accept-Encoding`** — reqwest manages compression negotiation itself
+///   (with auto-decompression disabled on the client); a second forwarded
+///   `Accept-Encoding` would create a duplicate and potentially corrupt the
+///   downloaded file by triggering transparent decompression mid-stream.
+/// - **`Content-Length`** / **`Content-Type`** on outgoing GET requests —
+///   browser-captured values relate to the *browser's* request, not rdm's
+///   replay, and can confuse the upstream server.
 fn json_headers_to_vec(
     headers: &HashMap<String, serde_json::Value>,
 ) -> HashMap<String, Vec<String>> {
+    /// Headers that must be stripped before forwarding to the upstream server.
+    fn is_blocked(key: &str) -> bool {
+        matches!(
+            key.to_lowercase().as_str(),
+            // Hop-by-hop (RFC 7230 §6.1)
+            | "host"
+            | "connection"
+            | "keep-alive"
+            | "transfer-encoding"
+            | "te"
+            | "trailer"
+            | "upgrade"
+            // Proxy-specific — never forwarded
+            | "proxy-authorization"
+            | "proxy-authenticate"
+            | "proxy-connection"
+            // Managed separately by HeaderData.cookies / apply_headers
+            | "cookie"
+            // Managed by reqwest (auto-decompression disabled on the client)
+            | "accept-encoding"
+            // Body-related — not relevant for rdm's GET replay
+            | "content-length"
+            | "content-type"
+        )
+    }
+
     headers
         .iter()
         .filter_map(|(k, v)| {
+            if is_blocked(k) {
+                return None;
+            }
             let values: Vec<String> = match v {
                 serde_json::Value::Array(arr) => arr
                     .iter()

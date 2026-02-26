@@ -210,14 +210,107 @@ pub async fn download_piece(
     }
 }
 
+/// Extract the filename from a `Content-Disposition` header value.
+///
+/// Handles both the plain `filename=` form and the RFC 5987 `filename*=`
+/// extended form (e.g. `filename*=UTF-8''My%20File.mp4`).  The RFC 5987
+/// form takes priority when both are present.
 pub fn extract_filename(disposition: &str) -> Option<String> {
-    if let Some(idx) = disposition.find("filename=") {
-        let start = idx + 9;
-        let end = disposition[start..]
-            .find(';')
-            .unwrap_or(disposition.len() - start);
-        Some(disposition[start..start + end].trim_matches('"').to_string())
+    // RFC 5987: filename*=charset'language'encoded-value (preferred)
+    if let Some(name) = extract_filename_star(disposition) {
+        return Some(name);
+    }
+
+    // Plain filename="..." or filename=...
+    extract_filename_plain(disposition)
+}
+
+/// Extract `filename*=UTF-8''...` (RFC 5987 extended notation).
+fn extract_filename_star(disposition: &str) -> Option<String> {
+    // Case-insensitive search for "filename*="
+    let lower = disposition.to_lowercase();
+    let key = "filename*=";
+    let idx = lower.find(key)?;
+    let rest = &disposition[idx + key.len()..];
+    // Strip optional surrounding whitespace / quotes
+    let rest = rest.split(';').next().unwrap_or(rest).trim();
+
+    // Format: charset'language'encoded-value
+    // We only handle UTF-8 (the overwhelmingly common case).
+    let after_charset = if let Some(s) = rest.strip_prefix("UTF-8''").or_else(|| rest.strip_prefix("utf-8''")) {
+        s
     } else {
+        // Unknown charset — fall through to plain filename=
+        return None;
+    };
+
+    // Percent-decode the value.
+    Some(percent_decode(after_charset))
+}
+
+/// Percent-decode a URL-encoded string (e.g. `My%20File.mp4` → `My File.mp4`).
+fn percent_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    // Collect bytes for multi-byte UTF-8 sequences
+    let mut pending: Vec<u8> = Vec::new();
+
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            // Try to read two hex digits
+            let h1 = chars.next();
+            let h2 = chars.next();
+            if let (Some(h1), Some(h2)) = (h1, h2) {
+                let hex = format!("{}{}", h1, h2);
+                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                    pending.push(byte);
+                    continue;
+                }
+            }
+            // Not valid hex — flush pending and emit literally
+            flush_pending(&mut pending, &mut out);
+            out.push('%');
+            if let Some(h1) = h1 {
+                out.push(h1);
+            }
+            if let Some(h2) = h2 {
+                out.push(h2);
+            }
+        } else {
+            flush_pending(&mut pending, &mut out);
+            out.push(c);
+        }
+    }
+    flush_pending(&mut pending, &mut out);
+    out
+}
+
+fn flush_pending(pending: &mut Vec<u8>, out: &mut String) {
+    if pending.is_empty() {
+        return;
+    }
+    if let Ok(s) = std::str::from_utf8(pending) {
+        out.push_str(s);
+    } else {
+        // Replace invalid UTF-8 sequences with replacement character
+        out.push('\u{FFFD}');
+    }
+    pending.clear();
+}
+
+/// Extract a plain `filename=` value (with or without quotes).
+fn extract_filename_plain(disposition: &str) -> Option<String> {
+    let lower = disposition.to_lowercase();
+    let key = "filename=";
+    let idx = lower.find(key)?;
+    let start = idx + key.len();
+    let slice = &disposition[start..];
+    // Terminate at `;` (next parameter boundary)
+    let end = slice.find(';').unwrap_or(slice.len());
+    let raw = slice[..end].trim().trim_matches('"');
+    if raw.is_empty() {
         None
+    } else {
+        Some(raw.to_string())
     }
 }

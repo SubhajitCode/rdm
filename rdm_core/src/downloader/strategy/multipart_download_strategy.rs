@@ -58,12 +58,20 @@ impl MultipartDownloadStrategy {
                 content_type: None,
             })),
             pieces: Arc::new(RwLock::new(HashMap::new())),
-            // Tuned HTTP client: connection pool, timeouts, TCP optimizations
+            // Tuned HTTP client: connection pool, timeouts, TCP optimizations.
+            // Auto-decompression is explicitly disabled so that:
+            //   1. reqwest does not inject an `Accept-Encoding` header that
+            //      would duplicate the one from the browser's captured headers.
+            //   2. The raw (possibly compressed) bytes are written to disk as-is,
+            //      which is correct for file downloads — we want the original bytes.
             client: Arc::new(
                 Client::builder()
                     .connect_timeout(std::time::Duration::from_secs(10))
-                    .pool_max_idle_per_host(MAX_CONNECTIONS) // match concurrency
+                    .pool_max_idle_per_host(MAX_CONNECTIONS)
                     .tcp_nodelay(true)
+                    .no_gzip()
+                    .no_deflate()
+                    .no_brotli()
                     .build()
                     .expect("failed to build HTTP client"),
             ),
@@ -360,11 +368,25 @@ impl DownloadStrategy for MultipartDownloadStrategy {
 
             let piece_ids: Vec<String> = sorted.iter().map(|p| p.id.clone()).collect();
             let temp_dir = state.temp_dir.clone();
-            let output_file = state
+
+            // Resolve the output file path:
+            //   1. Use the pre-computed output_path if set.
+            //   2. Fall back to the attachment_name from Content-Disposition.
+            //   3. Last resort: "download.bin".
+            let base_output = state
                 .output_path
                 .clone()
                 .or_else(|| state.attachment_name.clone())
                 .unwrap_or_else(|| "download.bin".to_string());
+
+            // If the resolved path has no extension, try to add one from:
+            //   a) the attachment_name (Content-Disposition)
+            //   b) the content_type (MIME type)
+            let output_file = ensure_extension(
+                base_output,
+                state.attachment_name.as_deref(),
+                state.content_type.as_deref(),
+            );
 
             (piece_ids, temp_dir, output_file)
         }; // locks dropped here — not held during I/O
@@ -403,6 +425,77 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         Ok(())
     }
 }
+
+// ---------------------------------------------------------------------------
+// Extension helpers
+// ---------------------------------------------------------------------------
+
+/// If `path` already has a file extension, return it unchanged.
+/// Otherwise try to derive an extension from `attachment_name` (Content-
+/// Disposition) or `content_type` (MIME type) and append it.
+fn ensure_extension(
+    path: String,
+    attachment_name: Option<&str>,
+    content_type: Option<&str>,
+) -> String {
+    let pb = PathBuf::from(&path);
+    if pb.extension().is_some() {
+        return path; // already has an extension
+    }
+
+    // Try attachment_name extension first, then MIME type.
+    let ext = attachment_name
+        .and_then(|n| PathBuf::from(n).extension().map(|e| e.to_string_lossy().into_owned()))
+        .or_else(|| ext_from_mime(content_type));
+
+    match ext {
+        Some(e) if !e.is_empty() => format!("{}.{}", path, e.to_lowercase()),
+        _ => path,
+    }
+}
+
+/// Map a MIME type string to a file extension.
+fn ext_from_mime(content_type: Option<&str>) -> Option<String> {
+    let mime = content_type?
+        .split(';')
+        .next()?
+        .trim()
+        .to_lowercase();
+
+    let ext = match mime.as_str() {
+        "video/mp4" | "video/x-m4v"                        => "mp4",
+        "video/x-matroska"                                  => "mkv",
+        "video/webm"                                        => "webm",
+        "video/x-msvideo"                                   => "avi",
+        "video/quicktime"                                   => "mov",
+        "video/x-ms-wmv"                                    => "wmv",
+        "video/3gpp"                                        => "3gp",
+        "video/x-flv"                                       => "flv",
+        "video/mpeg"                                        => "mpg",
+        "audio/mpeg"                                        => "mp3",
+        "audio/flac"                                        => "flac",
+        "audio/ogg"                                         => "ogg",
+        "audio/wav" | "audio/x-wav"                        => "wav",
+        "audio/aac"                                         => "aac",
+        "audio/x-m4a" | "audio/mp4"                        => "m4a",
+        "audio/opus"                                        => "opus",
+        "application/zip"                                   => "zip",
+        "application/x-tar"                                 => "tar",
+        "application/gzip" | "application/x-gzip"          => "gz",
+        "application/x-bzip2"                               => "bz2",
+        "application/x-7z-compressed"                       => "7z",
+        "application/x-rar-compressed" | "application/vnd.rar" => "rar",
+        "application/pdf"                                   => "pdf",
+        "application/x-msdownload"                          => "exe",
+        "application/x-ms-installer" | "application/x-msi" => "msi",
+        "application/vnd.debian.binary-package"             => "deb",
+        "application/x-rpm"                                 => "rpm",
+        "application/x-apple-diskimage"                     => "dmg",
+        _ => return None,
+    };
+    Some(ext.to_string())
+}
+
 impl MultipartDownloadStrategyBuilder {
     pub fn new(url: String, path: PathBuf) -> Self {
         let (progress_tx, progress_rx) = mpsc::channel(256);
@@ -438,7 +531,11 @@ impl MultipartDownloadStrategyBuilder {
             let mut state = self.strategy.state.write().unwrap();
             let key = key.into();
             let value = value.into();
-            state.headers.entry(key).or_insert_with(Vec::new).push(value);
+            // Replace the existing value(s) for this key — using insert instead
+            // of push so that calling add_header("User-Agent", ua) never
+            // produces a duplicate when the key is already present in the
+            // captured request headers.
+            state.headers.insert(key, vec![value]);
         }
         self
     }
