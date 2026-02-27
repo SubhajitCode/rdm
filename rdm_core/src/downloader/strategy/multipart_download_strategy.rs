@@ -112,6 +112,12 @@ impl MultipartDownloadStrategy {
 /// splits the largest piece in half until we reach `max_connections` pieces
 /// or every piece is at the minimum size.
 fn create_pieces(file_size: u64, max_connections: usize) -> Vec<Piece> {
+    log::info!(
+        "[create_pieces] file_size={}, max_connections={}",
+        file_size,
+        max_connections
+    );
+
     // Start with one piece covering the whole file
     let mut pieces = vec![Piece::new(
         Uuid::new_v4().to_string(),
@@ -133,12 +139,22 @@ fn create_pieces(file_size: u64, max_connections: usize) -> Vec<Piece> {
 
         // Don't split if it would produce pieces below minimum size
         if piece.length < MIN_PIECE_SIZE * 2 {
+            log::debug!(
+                "[create_pieces] stopping split: largest piece length={} < MIN_PIECE_SIZE*2={}",
+                piece.length,
+                MIN_PIECE_SIZE * 2
+            );
             break;
         }
 
         let half = piece.length / 2;
         let new_offset = piece.offset + half;
         let new_length = piece.length - half;
+
+        log::debug!(
+            "[create_pieces] splitting piece[{}]: offset={}, length={} -> half={}, new_offset={}, new_length={}",
+            max_idx, piece.offset, piece.length, half, new_offset, new_length
+        );
 
         // Shrink the original piece
         pieces[max_idx].length = half;
@@ -149,6 +165,21 @@ fn create_pieces(file_size: u64, max_connections: usize) -> Vec<Piece> {
             new_offset,
             new_length,
         ));
+    }
+
+    // Log final pieces summary
+    let total: i64 = pieces.iter().map(|p| p.length).sum();
+    log::info!(
+        "[create_pieces] created {} pieces, total_bytes={}, file_size={}",
+        pieces.len(),
+        total,
+        file_size
+    );
+    for (i, p) in pieces.iter().enumerate() {
+        log::debug!(
+            "[create_pieces]   piece[{}]: offset={}, length={}, end={}",
+            i, p.offset, p.length, p.offset + p.length - 1
+        );
     }
 
     pieces
@@ -204,11 +235,17 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         // 6. Create pieces based on probe results
         let new_pieces = if resumable {
             if let Some(file_size) = resource_size {
+                log::info!(
+                    "[preprocess] resumable=true, file_size={}, creating multipart pieces with max_connections={}",
+                    file_size, MAX_CONNECTIONS
+                );
                 create_pieces(file_size, MAX_CONNECTIONS)
             } else {
+                log::info!("[preprocess] resumable=true but file_size unknown, using single piece");
                 vec![Piece::new(Uuid::new_v4().to_string(), 0, -1)]
             }
         } else {
+            log::info!("[preprocess] resumable=false, using single piece (full download)");
             vec![Piece::new(Uuid::new_v4().to_string(), 0, -1)]
         };
 
@@ -397,17 +434,29 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             use std::io::Write;
 
             let mut output = File::create(&output_file)?;
+            let mut total_assembled: u64 = 0;
 
             for piece_id in &piece_ids {
                 let piece_path = PathBuf::from(&temp_dir).join(piece_id);
+                let piece_file_size = std::fs::metadata(&piece_path)?.len();
+                log::info!(
+                    "[postprocess] assembling piece={}: file_size={} bytes",
+                    piece_id, piece_file_size
+                );
+                total_assembled += piece_file_size;
+
                 let mut input = File::open(&piece_path)?;
-                // Use std::io::copy — on Linux it uses copy_file_range(2) for
-                // zero-copy kernel-side transfer. On macOS, it uses an optimized
-                // internal buffer. Much better than manual 64KB buffer loops.
                 std::io::copy(&mut input, &mut output)?;
             }
 
             output.flush()?;
+
+            log::info!(
+                "[postprocess] assembly complete: total_assembled={} bytes across {} pieces, output={}",
+                total_assembled,
+                piece_ids.len(),
+                output_file
+            );
 
             // Clean up temp files
             for piece_id in &piece_ids {

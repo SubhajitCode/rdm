@@ -10,12 +10,18 @@ use tokio_util::sync::CancellationToken;
 use crate::types::types::{DownloadError, HeaderData, Piece, ProbeResult, SegmentState};
 
 /// Applies common headers (custom headers, cookies, auth) to a request builder.
+/// Skips the `Range` header — rdm sets its own Range per piece/probe, and a
+/// stale browser-captured Range would create a duplicate causing the server
+/// to return incorrect data.
 fn apply_headers(
     mut builder: reqwest::RequestBuilder,
     header_data: &HeaderData,
     precomputed_auth: Option<&str>,
 ) -> reqwest::RequestBuilder {
     for (key, values) in &header_data.headers {
+        if key.eq_ignore_ascii_case("range") {
+            continue;
+        }
         for value in values {
             builder = builder.header(key, value);
         }
@@ -131,11 +137,43 @@ pub async fn download_piece(
         if piece.length > 0 {
             let start = piece.offset + piece.downloaded;
             let end = piece.offset + piece.length - 1;
+            log::info!(
+                "[download_piece] piece={}: requesting Range: bytes={}-{} (offset={}, length={}, already_downloaded={})",
+                piece.id, start, end, piece.offset, piece.length, piece.downloaded
+            );
             builder = builder.header("Range", format!("bytes={}-{}", start, end));
+        } else {
+            log::info!(
+                "[download_piece] piece={}: no Range header (non-resumable, length={})",
+                piece.id, piece.length
+            );
         }
 
         match builder.send().await {
             Ok(response) => {
+                let status = response.status();
+                let content_length = response.content_length();
+                log::info!(
+                    "[download_piece] piece={}: response status={}, content_length={:?}, expected_piece_length={}",
+                    piece.id, status, content_length, piece.length
+                );
+
+                // BUG DETECTION: If we sent a Range request but got 200 (not 206),
+                // the server ignored our Range header and is sending the ENTIRE file.
+                // Each of the N pieces will download the full file, resulting in Nx file size.
+                if piece.length > 0 && status == reqwest::StatusCode::OK {
+                    log::error!(
+                        "[download_piece] BUG: piece={}: sent Range request but server responded with 200 OK instead of 206 Partial Content! \
+                         The server is sending the ENTIRE file body ({:?} bytes) instead of just the requested range. \
+                         This piece expected only {} bytes. With {} connections, the final file will be {}x too large.",
+                        piece.id,
+                        content_length,
+                        piece.length,
+                        8, // MAX_CONNECTIONS
+                        8  // MAX_CONNECTIONS
+                    );
+                }
+
                 // Open temp file with async I/O + 256 KB write buffer
                 let file_path = temp_dir.join(&piece.id);
                 let file = if piece.downloaded > 0 {
@@ -151,6 +189,15 @@ pub async fn download_piece(
                 };
                 let mut writer = tokio::io::BufWriter::with_capacity(256 * 1024, file);
 
+                // How many bytes this piece still needs. For non-resumable
+                // downloads (length == -1) we accept everything the server sends.
+                let remaining = if piece.length > 0 {
+                    (piece.length - piece.downloaded) as u64
+                } else {
+                    u64::MAX
+                };
+                let mut bytes_written: u64 = 0;
+
                 // Stream the response body chunk by chunk
                 let mut stream = response.bytes_stream();
                 let mut stream_error = false;
@@ -163,13 +210,45 @@ pub async fn download_piece(
 
                     match chunk_result {
                         Ok(chunk) => {
+                            // Cap the write to the remaining bytes this piece needs.
+                            // Servers may ignore the Range header and send the full
+                            // file body even when responding with 206; without this
+                            // guard every piece would contain the entire file and the
+                            // assembled output would be N× too large.
+                            let to_write = if piece.length > 0 {
+                                let left = remaining - bytes_written;
+                                let usable = (chunk.len() as u64).min(left);
+                                &chunk[..usable as usize]
+                            } else {
+                                &chunk[..]
+                            };
+
+                            if to_write.is_empty() {
+                                // Already received all the bytes we need — stop early.
+                                log::debug!(
+                                    "[download_piece] piece={}: received all {} expected bytes, stopping stream",
+                                    piece.id, piece.length
+                                );
+                                break;
+                            }
+
                             writer
-                                .write_all(&chunk)
+                                .write_all(to_write)
                                 .await
                                 .map_err(DownloadError::Disk)?;
-                            let chunk_len = chunk.len() as u64;
-                            piece.downloaded += chunk_len as i64;
-                            on_progress(chunk_len);
+                            let written_len = to_write.len() as u64;
+                            bytes_written += written_len;
+                            piece.downloaded += written_len as i64;
+                            on_progress(written_len);
+
+                            // If we have exactly enough, stop reading.
+                            if piece.length > 0 && bytes_written >= remaining {
+                                log::debug!(
+                                    "[download_piece] piece={}: reached expected length {}, stopping stream",
+                                    piece.id, piece.length
+                                );
+                                break;
+                            }
                         }
                         Err(_e) => {
                             // Network error mid-stream — flush what we have, then retry
@@ -193,6 +272,23 @@ pub async fn download_piece(
                 }
 
                 writer.flush().await.map_err(DownloadError::Disk)?;
+
+                log::info!(
+                    "[download_piece] piece={}: finished. downloaded={} bytes, expected_length={} bytes, match={}",
+                    piece.id, piece.downloaded, piece.length,
+                    if piece.length > 0 { piece.downloaded == piece.length } else { true }
+                );
+
+                // BUG DETECTION: downloaded more bytes than the piece should contain
+                if piece.length > 0 && piece.downloaded != piece.length {
+                    log::error!(
+                        "[download_piece] BUG: piece={}: size mismatch! downloaded={} but expected={}. \
+                         The server likely ignored the Range header and sent the full file. \
+                         This will cause the assembled output to be larger than the original file.",
+                        piece.id, piece.downloaded, piece.length
+                    );
+                }
+
                 piece.state = SegmentState::Finished;
                 return Ok(piece);
             }

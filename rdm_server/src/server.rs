@@ -405,6 +405,10 @@ fn json_headers_to_vec(
             | "cookie"
             // Managed by reqwest (auto-decompression disabled on the client)
             | "accept-encoding"
+            // Managed by piece_grabber — rdm sets its own Range header per piece;
+            // a browser-captured Range would create a duplicate and cause the
+            // server to return the wrong byte range (or the full file).
+            | "range"
             // Body-related — not relevant for rdm's GET replay
             | "content-length"
             | "content-type"
