@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use tokio::sync::watch;
-
-use rdm_core::progress::{ProgressObserver, ProgressSnapshot};
+use rdm_core::progress::observer::ProgressObserver;
+use rdm_core::progress::snapshot::ProgressSnapshot;
 
 /// Observes download progress and pushes snapshots to a `watch` channel
 /// so that SSE clients can receive them via `rx.changed().await`.

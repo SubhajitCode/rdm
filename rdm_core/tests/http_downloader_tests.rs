@@ -207,7 +207,8 @@ async fn test_http_downloader_invalid_url_fails() {
 
 use std::sync::Mutex;
 use async_trait::async_trait;
-use rdm_core::progress::{ProgressObserver, ProgressSnapshot};
+use rdm_core::progress::observer::ProgressObserver;
+use rdm_core::progress::snapshot::ProgressSnapshot;
 
 struct CollectingObserver {
     total_bytes: Mutex<u64>,

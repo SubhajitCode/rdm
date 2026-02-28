@@ -3,7 +3,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::downloader::strategy::download_strategy::DownloadStrategy;
-use crate::progress::{ProgressNotifier, ProgressObserver};
+use crate::progress::notifier::ProgressNotifier;
+use crate::progress::observer::ProgressObserver;
 use crate::types::types::DownloadError;
 
 pub struct HttpDownloader {

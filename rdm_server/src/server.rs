@@ -14,8 +14,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use rdm_core::downloader::http_downloader::HttpDownloader;
 use rdm_core::downloader::strategy::multipart_download_strategy::MultipartDownloadStrategy;
-use rdm_core::progress::ProgressSnapshot;
-
+use rdm_core::progress::snapshot::ProgressSnapshot;
 use crate::path_sanitizer::safe_output_path;
 use crate::sse_observer::SseProgressObserver;
 use crate::types::{

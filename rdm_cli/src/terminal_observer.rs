@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::sync::Mutex;
-
-use rdm_core::progress::{format_bytes, ProgressObserver, ProgressSnapshot};
+use rdm_core::progress::observer::ProgressObserver;
+use rdm_core::progress::snapshot::{format_bytes, ProgressSnapshot};
 
 /// Renders download progress as indicatif terminal bars.
 ///
