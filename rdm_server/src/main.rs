@@ -1,4 +1,5 @@
 use std::io::Write;
+use clap::Parser;
 use rdm_server::server::AppState;
 
 /// Directory that contains this crate's Cargo.toml, embedded at compile time.
@@ -21,9 +22,21 @@ fn osc8_link(abs_path: &str, line: u32) -> String {
     format!("\x1b]8;;{}\x07{}:{}\x1b]8;;\x07", url, abs_path, line)
 }
 
+#[derive(Parser)]
+#[command(name = "rdmd", about = "Rust Download Manager")]
+struct Args{
+    #[arg(short, long)]
+    host: Option<String>,
+    #[arg(short, long)]
+    port: Option<String>,
+    #[arg(short, long)]
+    connections: Option<usize>,
+}
+
 #[tokio::main]
 async fn main() {
     let workspace = workspace_root();
+    let args = Args::parse();
 
     let mut builder = env_logger::Builder::from_default_env();
     // Force ANSI output even when stderr is not a TTY (e.g. redirected to a file
@@ -60,11 +73,12 @@ async fn main() {
     });
     builder.init();
 
-    let host = std::env::var("RDM_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let port = std::env::var("RDM_PORT").unwrap_or_else(|_| "8597".to_string());
+    let host = args.host.unwrap_or(std::env::var("RDM_HOST").unwrap_or("127.0.0.1".to_string())) ;
+    let port = args.port.unwrap_or(std::env::var("RDM_PORT").unwrap_or("8597".to_string()));
+    let connections = args.connections.unwrap_or(std::env::var("RDM_CONN_SIZE").unwrap_or("8".to_string()).parse().unwrap());
     let addr = format!("{}:{}", host, port);
 
-    let state = AppState::new();
+    let state = AppState::with_connections(connections);
     let app = rdm_server::server::router(state);
 
     let listener = tokio::net::TcpListener::bind(&addr)

@@ -26,6 +26,7 @@ pub struct MultipartDownloadStrategy {
     /// Set by `HttpDownloader` just before `download()` runs.
     /// `None` while no progress consumer is attached (events are silently dropped).
     progress_tx: StdMutex<Option<mpsc::Sender<Result<ProgressEvent, String>>>>,
+    connections: usize,
 }
 pub struct MultipartDownloadStrategyBuilder {
     strategy: MultipartDownloadStrategy,
@@ -68,6 +69,7 @@ impl MultipartDownloadStrategy {
             ),
             cancel_token: CancellationToken::new(),
             progress_tx: StdMutex::new(None),
+            connections: MAX_CONNECTIONS,
         }
     }
 
@@ -236,9 +238,9 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             if let Some(file_size) = resource_size {
                 log::info!(
                     "[preprocess] resumable=true, file_size={}, creating multipart pieces with max_connections={}",
-                    file_size, MAX_CONNECTIONS
+                    file_size, self.connections
                 );
-                create_pieces(file_size, MAX_CONNECTIONS)
+                create_pieces(file_size, self.connections)
             } else {
                 log::info!("[preprocess] resumable=true but file_size unknown, using single piece");
                 vec![Piece::new(Uuid::new_v4().to_string(), 0, -1)]
@@ -641,6 +643,13 @@ impl MultipartDownloadStrategyBuilder {
         {
             let mut state = self.strategy.state.write().unwrap();
             state.content_type = Some(content_type);
+        }
+        self
+    }
+    
+    pub fn with_connection_size(mut self, connections: usize) -> Self {
+        {
+            self.strategy.connections= connections;
         }
         self
     }

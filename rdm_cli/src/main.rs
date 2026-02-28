@@ -20,6 +20,8 @@ struct Args {
     /// Output file path
     #[arg(short, long, default_value = "downloaded_file")]
     output: PathBuf,
+    #[arg(short, long, default_value = "8")]
+    connections: Option<usize>,
 }
 
 #[tokio::main]
@@ -28,8 +30,9 @@ async fn main() {
     let args = Args::parse();
     let url = args.url;
     let output_path = args.output;
+    let connections = args.connections.unwrap_or(8);
 
-    let strategy = Arc::new(MultipartDownloadStrategy::new(url.clone(), output_path));
+    let strategy = Arc::new(MultipartDownloadStrategy::builder(url.clone(), output_path).with_connection_size(connections).build());
     let mut downloader = HttpDownloader::new(strategy);
     downloader.add_observer(Box::new(TerminalProgressObserver::new()));
 

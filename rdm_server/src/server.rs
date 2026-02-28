@@ -59,6 +59,8 @@ pub struct AppState {
     /// Active and recently completed downloads, keyed by video id.
     /// TODO migrate to db or any other persistent storage
     pub downloads: Arc<RwLock<HashMap<String, ActiveDownload>>>,
+
+    pub connections: usize,
 }
 
 impl AppState {
@@ -66,6 +68,15 @@ impl AppState {
         Arc::new(Self {
             video_tracker: Arc::new(RwLock::new(VideoTracker::new())),
             downloads:     Arc::new(RwLock::new(HashMap::new())),
+            connections:   8,
+        })
+    }
+
+    pub fn with_connections(connections: usize) -> Arc<Self> {
+        Arc::new(Self {
+            video_tracker: Arc::new(RwLock::new(VideoTracker::new())),
+            downloads:     Arc::new(RwLock::new(HashMap::new())),
+            connections,
         })
     }
 }
@@ -300,7 +311,7 @@ fn spawn_download(item: VideoListItem, state: Arc<AppState>) {
 
     // Build the strategy via the builder.
     let builder = MultipartDownloadStrategy::builder(item.url.clone(), output_path.clone())
-        .with_headers(req_headers);
+        .with_headers(req_headers).with_connection_size(state.connections);
 
     // Set cookies if present.
     let builder = if !item.cookie.is_empty() {
