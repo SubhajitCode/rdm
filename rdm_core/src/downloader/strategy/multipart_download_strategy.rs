@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -23,19 +23,16 @@ pub struct MultipartDownloadStrategy {
     pieces: Arc<RwLock<HashMap<String, Piece>>>,
     client: Arc<Client>,
     cancel_token: CancellationToken,
-    progress_tx: mpsc::Sender<ProgressEvent>,
+    /// Set by `HttpDownloader` just before `download()` runs.
+    /// `None` while no progress consumer is attached (events are silently dropped).
+    progress_tx: StdMutex<Option<mpsc::Sender<Result<ProgressEvent, String>>>>,
 }
-pub struct MultipartDownloadStrategyBuilder{
+pub struct MultipartDownloadStrategyBuilder {
     strategy: MultipartDownloadStrategy,
-    event_receiver: mpsc::Receiver<ProgressEvent>,
 }
 
 impl MultipartDownloadStrategy {
-    pub fn new(
-        url: String,
-        output_path: PathBuf,
-        progress_tx: mpsc::Sender<ProgressEvent>,
-    ) -> Self {
+    pub fn new(url: String, output_path: PathBuf) -> Self {
         let id = Uuid::new_v4().to_string();
         let temp_dir = std::env::temp_dir().join(&id);
         let output_path_str = output_path.to_string_lossy().to_string();
@@ -58,12 +55,6 @@ impl MultipartDownloadStrategy {
                 content_type: None,
             })),
             pieces: Arc::new(RwLock::new(HashMap::new())),
-            // Tuned HTTP client: connection pool, timeouts, TCP optimizations.
-            // Auto-decompression is explicitly disabled so that:
-            //   1. reqwest does not inject an `Accept-Encoding` header that
-            //      would duplicate the one from the browser's captured headers.
-            //   2. The raw (possibly compressed) bytes are written to disk as-is,
-            //      which is correct for file downloads — we want the original bytes.
             client: Arc::new(
                 Client::builder()
                     .connect_timeout(std::time::Duration::from_secs(10))
@@ -76,7 +67,7 @@ impl MultipartDownloadStrategy {
                     .expect("failed to build HTTP client"),
             ),
             cancel_token: CancellationToken::new(),
-            progress_tx,
+            progress_tx: StdMutex::new(None),
         }
     }
 
@@ -202,6 +193,14 @@ fn build_header_data(
 
 #[async_trait]
 impl DownloadStrategy for MultipartDownloadStrategy {
+    fn set_progress_tx(&self, tx: mpsc::Sender<Result<ProgressEvent, String>>) {
+        *self.progress_tx.lock().unwrap() = Some(tx);
+    }
+
+    fn clear_progress_tx(&self) {
+        *self.progress_tx.lock().unwrap() = None;
+    }
+
     /// Probes the URL, determines file size and resumability, creates temp
     /// directory, and splits the file into download pieces.
     async fn preprocess(&self) -> Result<(), DownloadError> {
@@ -264,6 +263,10 @@ impl DownloadStrategy for MultipartDownloadStrategy {
     /// Downloads all pieces concurrently. Each piece is downloaded in its own
     /// tokio task. Waits for all tasks to complete and propagates errors.
     async fn download(&self) -> Result<(), DownloadError> {
+        // Snapshot the optional sender once — all piece tasks share a clone.
+        let progress_tx: Option<mpsc::Sender<Result<ProgressEvent, String>>> =
+            self.progress_tx.lock().unwrap().clone();
+
         // Wrap HeaderData in Arc — shared across all piece tasks without cloning
         let header_data = Arc::new(build_header_data(&self.state)?);
 
@@ -298,7 +301,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             let header_data = Arc::clone(&header_data); // cheap Arc clone
             let temp_dir = temp_dir.clone();
             let cancel_token = self.cancel_token.clone();
-            let progress_tx = self.progress_tx.clone();
+            let piece_tx = progress_tx.clone();
             let piece_id_for_progress = piece.id.clone();
             let piece_id_for_handle = piece.id.clone();
             let piece_total_bytes = if piece.length > 0 {
@@ -315,13 +318,13 @@ impl DownloadStrategy for MultipartDownloadStrategy {
                     temp_dir,
                     cancel_token,
                     |bytes_delta| {
-                        let _ = progress_tx.try_send(ProgressEvent {
-                            piece_id: piece_id_for_progress.clone(),
-                            bytes_delta,
-                            total_bytes: piece_total_bytes,
-                            speed: 0,
-                            progress: 0,
-                        });
+                        if let Some(tx) = &piece_tx {
+                            let _ = tx.try_send(Ok(ProgressEvent {
+                                piece_id: piece_id_for_progress.clone(),
+                                bytes_delta,
+                                total_bytes: piece_total_bytes,
+                            }));
+                        }
                     },
                 )
                 .await
@@ -368,6 +371,9 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         drop(pieces_guard);
 
         if let Some(e) = first_error {
+            if let Some(tx) = &progress_tx {
+                let _ = tx.try_send(Err(e.to_string()));
+            }
             return Err(e);
         }
 
@@ -552,11 +558,8 @@ fn ext_from_mime(content_type: Option<&str>) -> Option<String> {
 
 impl MultipartDownloadStrategyBuilder {
     pub fn new(url: String, path: PathBuf) -> Self {
-        let (progress_tx, progress_rx) = mpsc::channel(256);
-        let strategy = MultipartDownloadStrategy::new(url, path, progress_tx);
         Self {
-            strategy,
-            event_receiver: progress_rx,
+            strategy: MultipartDownloadStrategy::new(url, path),
         }
     }
 
@@ -642,7 +645,7 @@ impl MultipartDownloadStrategyBuilder {
         self
     }
 
-    pub fn build(self) -> (MultipartDownloadStrategy, mpsc::Receiver<ProgressEvent>) {
-        (self.strategy, self.event_receiver)
+    pub fn build(self) -> MultipartDownloadStrategy {
+        self.strategy
     }
 }

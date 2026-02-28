@@ -3,11 +3,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use clap::Parser;
-use tokio::sync::mpsc;
 
 use rdm_core::downloader::http_downloader::HttpDownloader;
 use rdm_core::downloader::strategy::multipart_download_strategy::MultipartDownloadStrategy;
-use rdm_core::progress::ProgressAggregator;
+
+mod terminal_observer;
+use terminal_observer::TerminalProgressObserver;
 
 #[derive(Parser)]
 #[command(name = "rdm", about = "Rust Download Manager")]
@@ -28,36 +29,14 @@ async fn main() {
     let url = args.url;
     let output_path = args.output;
 
-    // Channel for progress events
-    let (progress_tx, progress_rx) = mpsc::channel(256);
-
-    // Create the strategy and downloader
-    let strategy = Arc::new(MultipartDownloadStrategy::new(
-        url.clone(),
-        output_path,
-        progress_tx,
-    ));
-    let downloader = HttpDownloader::new(strategy.clone());
-
-    // Create the progress aggregator — drives indicatif terminal bars.
-    let (aggregator, _snapshot) = ProgressAggregator::new();
-
-    // Spawn the progress aggregator task.
-    let progress_handle = tokio::spawn(async move {
-        aggregator.run(progress_rx).await;
-    });
+    let strategy = Arc::new(MultipartDownloadStrategy::new(url.clone(), output_path));
+    let mut downloader = HttpDownloader::new(strategy);
+    downloader.add_observer(Box::new(TerminalProgressObserver::new()));
 
     println!("Starting download: {}", url);
     let start = Instant::now();
 
-    let result = downloader.download().await;
-
-    // Drop the strategy (and its progress_tx sender) so the progress
-    // receiver task can finish when the channel is drained.
-    drop(downloader);
-    drop(strategy);
-
-    match result {
+    match downloader.download().await {
         Ok(()) => {
             let elapsed = start.elapsed();
             println!("Download completed in {:.2}s", elapsed.as_secs_f64());
@@ -66,7 +45,4 @@ async fn main() {
             eprintln!("Download failed: {}", e);
         }
     }
-
-    // Wait for progress aggregator to drain and print summary
-    let _ = progress_handle.await;
 }

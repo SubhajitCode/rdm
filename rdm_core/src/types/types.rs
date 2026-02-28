@@ -112,6 +112,4 @@ pub struct ProgressEvent {
     pub piece_id: String,
     pub bytes_delta: u64,
     pub total_bytes: Option<u64>,
-    pub speed: u64,
-    pub progress: u8,
 }

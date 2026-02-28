@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use tokio::sync::mpsc;
 use wiremock::matchers::{header, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -69,8 +68,7 @@ async fn test_preprocess_resumable_creates_multiple_pieces() {
     let body_size = 2 * 1024 * 1024;
     let (server, _body) = setup_resumable_server(body_size).await;
 
-    let (tx, _rx) = mpsc::channel(16);
-    let strategy = MultipartDownloadStrategy::new(server.uri(), PathBuf::from("out.bin"), tx);
+    let strategy = MultipartDownloadStrategy::new(server.uri(), PathBuf::from("out.bin"));
 
     strategy.preprocess().await.unwrap();
 
@@ -115,8 +113,7 @@ async fn test_preprocess_non_resumable_creates_single_piece() {
     let body_size = 2 * 1024 * 1024;
     let (server, _body) = setup_non_resumable_server(body_size).await;
 
-    let (tx, _rx) = mpsc::channel(16);
-    let strategy = MultipartDownloadStrategy::new(server.uri(), PathBuf::from("out.bin"), tx);
+    let strategy = MultipartDownloadStrategy::new(server.uri(), PathBuf::from("out.bin"));
 
     strategy.preprocess().await.unwrap();
 
@@ -143,11 +140,9 @@ async fn test_preprocess_non_resumable_creates_single_piece() {
 
 #[tokio::test]
 async fn test_preprocess_invalid_url_returns_error() {
-    let (tx, _rx) = mpsc::channel(16);
     let strategy = MultipartDownloadStrategy::new(
         "http://127.0.0.1:1/nonexistent".to_string(),
         PathBuf::from("out.bin"),
-        tx,
     );
 
     let result = strategy.preprocess().await;
@@ -163,8 +158,7 @@ async fn test_download_writes_all_pieces_to_temp_files() {
     let body_size = 2 * 1024 * 1024;
     let (server, _body) = setup_resumable_server(body_size).await;
 
-    let (tx, _rx) = mpsc::channel(1024);
-    let strategy = MultipartDownloadStrategy::new(server.uri(), PathBuf::from("out.bin"), tx);
+    let strategy = MultipartDownloadStrategy::new(server.uri(), PathBuf::from("out.bin"));
 
     strategy.preprocess().await.unwrap();
     strategy.download().await.unwrap();
@@ -202,8 +196,7 @@ async fn test_download_writes_all_pieces_to_temp_files() {
 async fn test_download_no_pieces_is_noop() {
     let (server, _) = setup_resumable_server(1024).await;
 
-    let (tx, _rx) = mpsc::channel(16);
-    let strategy = MultipartDownloadStrategy::new(server.uri(), PathBuf::from("out.bin"), tx);
+    let strategy = MultipartDownloadStrategy::new(server.uri(), PathBuf::from("out.bin"));
 
     let result = strategy.download().await;
     assert!(result.is_ok(), "download with no pieces should be Ok");
@@ -217,8 +210,7 @@ async fn test_download_no_pieces_is_noop() {
 async fn test_stop_cancels_token() {
     let (server, _) = setup_resumable_server(1024).await;
 
-    let (tx, _rx) = mpsc::channel(16);
-    let strategy = MultipartDownloadStrategy::new(server.uri(), PathBuf::from("out.bin"), tx);
+    let strategy = MultipartDownloadStrategy::new(server.uri(), PathBuf::from("out.bin"));
 
     assert!(!strategy.cancel_token().is_cancelled());
     strategy.stop().await.unwrap();
@@ -229,8 +221,7 @@ async fn test_stop_cancels_token() {
 async fn test_pause_cancels_token() {
     let (server, _) = setup_resumable_server(1024).await;
 
-    let (tx, _rx) = mpsc::channel(16);
-    let strategy = MultipartDownloadStrategy::new(server.uri(), PathBuf::from("out.bin"), tx);
+    let strategy = MultipartDownloadStrategy::new(server.uri(), PathBuf::from("out.bin"));
 
     strategy.pause().await.unwrap();
     assert!(strategy.cancel_token().is_cancelled());
@@ -243,12 +234,10 @@ async fn test_pause_cancels_token() {
 #[tokio::test]
 async fn test_postprocess_assembles_pieces_in_order() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (tx, _rx) = mpsc::channel(16);
 
     let strategy = MultipartDownloadStrategy::new(
         "http://unused".to_string(),
         PathBuf::from("assembled_output.bin"),
-        tx,
     );
 
     {
@@ -311,12 +300,10 @@ async fn test_postprocess_assembles_pieces_in_order() {
 #[tokio::test]
 async fn test_postprocess_fails_if_piece_not_finished() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let (tx, _rx) = mpsc::channel(16);
 
     let strategy = MultipartDownloadStrategy::new(
         "http://unused".to_string(),
         PathBuf::from("out.bin"),
-        tx,
     );
 
     {
@@ -342,9 +329,8 @@ async fn test_full_lifecycle_with_mock_server() {
     let body_size = 512 * 1024;
     let (server, _expected_body) = setup_resumable_server(body_size).await;
 
-    let (tx, _rx) = mpsc::channel(1024);
     let strategy =
-        MultipartDownloadStrategy::new(server.uri(), PathBuf::from("lifecycle_test.bin"), tx);
+        MultipartDownloadStrategy::new(server.uri(), PathBuf::from("lifecycle_test.bin"));
 
     strategy.preprocess().await.unwrap();
     strategy.download().await.unwrap();

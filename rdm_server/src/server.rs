@@ -9,14 +9,15 @@ use axum::http::{Method, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use tokio::sync::RwLock;
+use tokio::sync::{watch, Mutex as TokioMutex, RwLock};
 use tower_http::cors::{Any, CorsLayer};
 
 use rdm_core::downloader::http_downloader::HttpDownloader;
 use rdm_core::downloader::strategy::multipart_download_strategy::MultipartDownloadStrategy;
-use rdm_core::progress::{ProgressAggregator, ProgressSnapshot};
+use rdm_core::progress::ProgressSnapshot;
 
 use crate::path_sanitizer::safe_output_path;
+use crate::sse_observer::SseProgressObserver;
 use crate::types::{
     ExtensionData, MediaData, SyncConfig, TabUpdateData, VideoListItem, VidRequest,
 };
@@ -41,9 +42,12 @@ pub struct ActiveDownload {
     pub id:          String,
     pub url:         String,
     pub output_path: PathBuf,
-    pub downloader:  Arc<HttpDownloader>,
+    /// Tokio Mutex because `HttpDownloader::download()` takes `&mut self`
+    /// and must be awaited — `tokio::sync::Mutex` is `Send` across `.await`.
+    pub downloader:  Arc<TokioMutex<HttpDownloader>>,
     pub status:      DownloadStatus,
-    pub progress:    Arc<std::sync::RwLock<ProgressSnapshot>>,
+    /// Receiver for the latest `ProgressSnapshot`; clone to subscribe from SSE handlers.
+    pub progress_rx: watch::Receiver<ProgressSnapshot>,
 }
 
 // ---------------------------------------------------------------------------
@@ -319,11 +323,12 @@ fn spawn_download(item: VideoListItem, state: Arc<AppState>) {
         builder
     };
 
-    let (strategy, progress_rx) = builder.build();
-    let downloader = Arc::new(HttpDownloader::new(Arc::new(strategy)));
+    let strategy = builder.build();
+    let mut downloader = HttpDownloader::new(Arc::new(strategy));
 
-    // Create the progress aggregator — drives terminal bars + shared snapshot.
-    let (aggregator, progress_snapshot) = ProgressAggregator::new();
+    // Create the SSE observer and register it with the downloader.
+    let (sse_observer, progress_watch_rx) = SseProgressObserver::new();
+    downloader.add_observer(Box::new(sse_observer));
 
     // Register the download in the shared map before spawning.
     let download_id = item.id.clone();
@@ -334,24 +339,39 @@ fn spawn_download(item: VideoListItem, state: Arc<AppState>) {
             id:          download_id.clone(),
             url:         download_url.clone(),
             output_path: output_path.clone(),
-            downloader:  Arc::clone(&downloader),
+            downloader:  Arc::new(TokioMutex::new(downloader)),
             status:      DownloadStatus::Running,
-            progress:    Arc::clone(&progress_snapshot),
+            progress_rx: progress_watch_rx,
         };
         tokio::spawn(async move {
             state_clone.downloads.write().await.insert(dl.id.clone(), dl);
         });
     }
 
-    // Spawn the actual download; update status when done.
-    let downloader_clone = Arc::clone(&downloader);
-    let state_for_done  = Arc::clone(&state);
-    let id_for_done     = download_id.clone();
-    let url_for_log     = download_url.clone();
+    // Spawn the download task. `HttpDownloader::download()` runs the notifier
+    // internally, so no external channel or notifier spawn is needed.
+    let state_for_done = Arc::clone(&state);
+    let id_for_done    = download_id.clone();
+    let url_for_log    = download_url.clone();
     tokio::spawn(async move {
-        let result = downloader_clone.download().await;
+        // Obtain an exclusive handle to the downloader from the shared map.
+        let downloader_arc = {
+            state_for_done
+                .downloads
+                .read()
+                .await
+                .get(&id_for_done)
+                .map(|dl| Arc::clone(&dl.downloader))
+        };
+
+        let Some(downloader_arc) = downloader_arc else {
+            log::error!("[vid] download entry missing for id={}", id_for_done);
+            return;
+        };
+
+        let result = downloader_arc.lock().await.download().await;
         let new_status = match &result {
-            Ok(())  => {
+            Ok(()) => {
                 log::info!("[vid] download complete  url=\"{}\"  path={:?}", url_for_log, output_path);
                 DownloadStatus::Complete
             }
@@ -360,16 +380,9 @@ fn spawn_download(item: VideoListItem, state: Arc<AppState>) {
                 DownloadStatus::Failed
             }
         };
-        // Update status in the map.
         if let Some(entry) = state_for_done.downloads.write().await.get_mut(&id_for_done) {
             entry.status = new_status;
         }
-    });
-
-    // Run the progress aggregator — drives indicatif terminal bars and
-    // keeps the shared ProgressSnapshot up to date for the SSE endpoint.
-    tokio::spawn(async move {
-        aggregator.run(progress_rx).await;
     });
 }
 
@@ -467,7 +480,7 @@ async fn cancel_handler(
 ) -> Json<serde_json::Value> {
     let mut downloads = state.downloads.write().await;
     if let Some(dl) = downloads.get_mut(&id) {
-        match dl.downloader.stop().await {
+        match dl.downloader.lock().await.stop().await {
             Ok(()) => {
                 dl.status = DownloadStatus::Cancelled;
                 log::info!("[cancel] id={} cancelled", id);
@@ -485,25 +498,27 @@ async fn cancel_handler(
 
 /// GET /progress/:id — Server-Sent Events stream of download progress.
 ///
-/// Emits a JSON `ProgressSnapshot` every 300ms until the download is done,
-/// then sends a final event and closes the stream.
+/// Waits for each change on the `watch` channel (true push) and emits it as
+/// a JSON `ProgressSnapshot` event.  Closes the stream once `done == true`.
 async fn progress_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    // Look up the download and clone the snapshot handle.
-    let snapshot = {
+    // Clone the watch receiver for this SSE client.
+    let mut rx = {
         let downloads = state.downloads.read().await;
         let dl = downloads.get(&id).ok_or(StatusCode::NOT_FOUND)?;
-        Arc::clone(&dl.progress)
+        dl.progress_rx.clone()
     };
 
-    // Use async_stream to have full control over when the stream ends.
     let stream = async_stream::stream! {
-        let mut interval = tokio::time::interval(Duration::from_millis(300));
         loop {
-            interval.tick().await;
-            let snap = snapshot.read().unwrap().clone();
+            // Wait until a new snapshot is published.
+            if rx.changed().await.is_err() {
+                // Sender dropped — download is over.
+                break;
+            }
+            let snap = rx.borrow_and_update().clone();
             let is_done = snap.done;
             let json = serde_json::to_string(&snap).unwrap_or_default();
             yield Ok::<_, Infallible>(Event::default().data(json));

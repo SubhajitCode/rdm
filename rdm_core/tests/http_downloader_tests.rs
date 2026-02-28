@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
 use wiremock::matchers::{header_regex, method};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -80,16 +79,14 @@ async fn test_http_downloader_end_to_end_with_range_server() {
         .mount(&server)
         .await;
 
-    let (tx, _rx) = mpsc::channel(1024);
     let output_filename = format!("test_e2e_output_{}.bin", uuid::Uuid::new_v4());
 
     let strategy = Arc::new(MultipartDownloadStrategy::new(
         server.uri(),
         PathBuf::from(&output_filename),
-        tx,
     ));
 
-    let downloader = HttpDownloader::new(strategy.clone());
+    let mut downloader = HttpDownloader::new(strategy.clone());
     downloader.download().await.unwrap();
 
     let output = std::fs::read(&output_filename).unwrap();
@@ -116,15 +113,13 @@ async fn test_http_downloader_non_resumable() {
         .mount(&server)
         .await;
 
-    let (tx, _rx) = mpsc::channel(256);
     let output_filename = "non_resumable_test.bin";
     let strategy = Arc::new(MultipartDownloadStrategy::new(
         server.uri(),
         PathBuf::from(output_filename),
-        tx,
     ));
 
-    let downloader = HttpDownloader::new(strategy);
+    let mut downloader = HttpDownloader::new(strategy);
     downloader.download().await.unwrap();
 
     let output = std::fs::read(output_filename).unwrap();
@@ -165,11 +160,9 @@ async fn test_http_downloader_stop_during_download() {
         .mount(&server)
         .await;
 
-    let (tx, _rx) = mpsc::channel(256);
     let strategy = Arc::new(MultipartDownloadStrategy::new(
         server.uri(),
         PathBuf::from("stop_test.bin"),
-        tx,
     ));
 
     strategy.preprocess().await.unwrap();
@@ -198,16 +191,51 @@ async fn test_http_downloader_stop_during_download() {
 
 #[tokio::test]
 async fn test_http_downloader_invalid_url_fails() {
-    let (tx, _rx) = mpsc::channel(16);
     let strategy = Arc::new(MultipartDownloadStrategy::new(
         "http://127.0.0.1:1/nonexistent".to_string(),
         PathBuf::from("fail_test.bin"),
-        tx,
     ));
 
-    let downloader = HttpDownloader::new(strategy);
+    let mut downloader = HttpDownloader::new(strategy);
     let result = downloader.download().await;
     assert!(result.is_err(), "download to unreachable host should fail");
+}
+
+// ---------------------------------------------------------------
+// Observer used in the progress test to collect events
+// ---------------------------------------------------------------
+
+use std::sync::Mutex;
+use async_trait::async_trait;
+use rdm_core::progress::{ProgressObserver, ProgressSnapshot};
+
+struct CollectingObserver {
+    total_bytes: Mutex<u64>,
+    event_count: Mutex<u64>,
+}
+
+impl CollectingObserver {
+    fn new() -> Self {
+        Self {
+            total_bytes: Mutex::new(0),
+            event_count: Mutex::new(0),
+        }
+    }
+
+    fn totals(&self) -> (u64, u64) {
+        (*self.total_bytes.lock().unwrap(), *self.event_count.lock().unwrap())
+    }
+}
+
+#[async_trait]
+impl ProgressObserver for CollectingObserver {
+    async fn on_progress(&self, snapshot: &ProgressSnapshot) {
+        let delta: u64 = snapshot.pieces.iter().map(|p| p.bytes_downloaded).sum();
+        *self.total_bytes.lock().unwrap() = delta;
+        *self.event_count.lock().unwrap() += 1;
+    }
+    async fn on_complete(&self, _snapshot: &ProgressSnapshot) {}
+    async fn on_error(&self, _error: &str) {}
 }
 
 #[tokio::test]
@@ -222,32 +250,37 @@ async fn test_http_downloader_progress_events_received() {
         .mount(&server)
         .await;
 
-    let (tx, mut rx) = mpsc::channel(1024);
-
     let strategy = Arc::new(MultipartDownloadStrategy::new(
         server.uri(),
         PathBuf::from("progress_test.bin"),
-        tx,
     ));
 
-    let downloader = HttpDownloader::new(strategy);
+    let observer = Arc::new(CollectingObserver::new());
+    let observer_clone = Arc::clone(&observer);
 
-    let progress_handle = tokio::spawn(async move {
-        let mut total: u64 = 0;
-        let mut count: u64 = 0;
-        while let Some(event) = rx.recv().await {
-            total += event.bytes_delta;
-            count += 1;
-        }
-        (total, count)
-    });
-
+    let mut downloader = HttpDownloader::new(strategy);
+    downloader.add_observer(Box::new(CollectingObserverHandle(observer_clone)));
     downloader.download().await.unwrap();
-    drop(downloader);
 
-    let (total, count) = progress_handle.await.unwrap();
+    let (total, count) = observer.totals();
     assert_eq!(total, body_size as u64, "total progress bytes should equal body size");
     assert!(count > 0, "should have received at least one progress event");
 
     let _ = std::fs::remove_file("progress_test.bin");
+}
+
+/// Newtype wrapper so we can move an Arc<CollectingObserver> into the observer box.
+struct CollectingObserverHandle(Arc<CollectingObserver>);
+
+#[async_trait]
+impl ProgressObserver for CollectingObserverHandle {
+    async fn on_progress(&self, snapshot: &ProgressSnapshot) {
+        self.0.on_progress(snapshot).await;
+    }
+    async fn on_complete(&self, snapshot: &ProgressSnapshot) {
+        self.0.on_complete(snapshot).await;
+    }
+    async fn on_error(&self, error: &str) {
+        self.0.on_error(error).await;
+    }
 }

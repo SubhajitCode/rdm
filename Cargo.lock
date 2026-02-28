@@ -1296,8 +1296,10 @@ dependencies = [
 name = "rdm_cli"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "clap",
  "env_logger",
+ "indicatif",
  "rdm_core",
  "tokio",
 ]
@@ -1309,7 +1311,6 @@ dependencies = [
  "async-trait",
  "base64",
  "futures",
- "indicatif",
  "log",
  "reqwest",
  "serde",
@@ -1327,6 +1328,7 @@ name = "rdm_server"
 version = "0.1.0"
 dependencies = [
  "async-stream",
+ "async-trait",
  "axum",
  "dirs-next",
  "env_logger",
