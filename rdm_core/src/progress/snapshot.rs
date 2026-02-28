@@ -1,9 +1,9 @@
 use serde::Serialize;
 
-/// Per-piece progress snapshot.
+/// Per-segment progress snapshot.
 #[derive(Debug, Clone, Serialize)]
-pub struct PieceSnapshot {
-    pub piece_id: String,
+pub struct SegmentSnapshot {
+    pub segment_id: String,
     pub bytes_downloaded: u64,
     pub total_bytes: u64,
     pub speed: f64,
@@ -13,7 +13,7 @@ pub struct PieceSnapshot {
 /// Aggregate progress snapshot for an entire download.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProgressSnapshot {
-    pub pieces: Vec<PieceSnapshot>,
+    pub segments: Vec<SegmentSnapshot>,
     pub total_bytes_downloaded: u64,
     pub total_bytes: u64,
     pub speed: f64,
@@ -24,7 +24,7 @@ pub struct ProgressSnapshot {
 impl ProgressSnapshot {
     pub fn empty() -> Self {
         Self {
-            pieces: Vec::new(),
+            segments: Vec::new(),
             total_bytes_downloaded: 0,
             total_bytes: 0,
             speed: 0.0,

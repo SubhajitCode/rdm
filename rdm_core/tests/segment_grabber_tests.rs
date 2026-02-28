@@ -7,8 +7,8 @@ use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{header, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use rdm_core::downloader::piece_grabber::{download_piece, extract_filename, probe_url};
-use rdm_core::types::types::{DownloadError, HeaderData, Piece, SegmentState};
+use rdm_core::downloader::segment_grabber::{download_segment, extract_filename, probe_url};
+use rdm_core::types::types::{DownloadError, HeaderData, Segment, SegmentState};
 
 /// Helper: creates a minimal HeaderData pointing at the given URL.
 fn make_header_data(url: &str) -> HeaderData {
@@ -157,11 +157,11 @@ async fn test_probe_network_error() {
 }
 
 // ---------------------------------------------------------------
-// download_piece
+// download_segment
 // ---------------------------------------------------------------
 
 #[tokio::test]
-async fn test_download_piece_full_body() {
+async fn test_download_segment_full_body() {
     let server = MockServer::start().await;
     let body = vec![0xABu8; 1024]; // 1 KB of 0xAB
 
@@ -175,14 +175,14 @@ async fn test_download_piece_full_body() {
     let temp_dir = tempfile::tempdir().unwrap();
     let cancel_token = CancellationToken::new();
 
-    // Non-resumable piece (length = -1)
-    let piece = Piece::new("piece-full".to_string(), 0, -1);
+    // Non-resumable segment (length = -1)
+    let segment = Segment::new("segment-full".to_string(), 0, -1);
 
     let progress = Arc::new(AtomicU64::new(0));
     let progress_clone = progress.clone();
 
-    let result = download_piece(
-        piece,
+    let result = download_segment(
+        segment,
         &client,
         &header_data,
         temp_dir.path().to_path_buf(),
@@ -193,18 +193,18 @@ async fn test_download_piece_full_body() {
     )
     .await;
 
-    let finished_piece = result.unwrap();
-    assert_eq!(finished_piece.state, SegmentState::Finished);
-    assert_eq!(finished_piece.downloaded, 1024);
+    let finished_segment = result.unwrap();
+    assert_eq!(finished_segment.state, SegmentState::Finished);
+    assert_eq!(finished_segment.downloaded, 1024);
     assert_eq!(progress.load(Ordering::Relaxed), 1024);
 
     // Verify file content
-    let file_content = std::fs::read(temp_dir.path().join("piece-full")).unwrap();
+    let file_content = std::fs::read(temp_dir.path().join("segment-full")).unwrap();
     assert_eq!(file_content, body);
 }
 
 #[tokio::test]
-async fn test_download_piece_with_range() {
+async fn test_download_segment_with_range() {
     let server = MockServer::start().await;
     let body = vec![0xCDu8; 512];
 
@@ -219,11 +219,11 @@ async fn test_download_piece_with_range() {
     let temp_dir = tempfile::tempdir().unwrap();
     let cancel_token = CancellationToken::new();
 
-    // Resumable piece with defined offset and length
-    let piece = Piece::new("piece-range".to_string(), 1024, 512);
+    // Resumable segment with defined offset and length
+    let segment = Segment::new("segment-range".to_string(), 1024, 512);
 
-    let result = download_piece(
-        piece,
+    let result = download_segment(
+        segment,
         &client,
         &header_data,
         temp_dir.path().to_path_buf(),
@@ -232,16 +232,16 @@ async fn test_download_piece_with_range() {
     )
     .await;
 
-    let finished_piece = result.unwrap();
-    assert_eq!(finished_piece.state, SegmentState::Finished);
-    assert_eq!(finished_piece.downloaded, 512);
+    let finished_segment = result.unwrap();
+    assert_eq!(finished_segment.state, SegmentState::Finished);
+    assert_eq!(finished_segment.downloaded, 512);
 
-    let file_content = std::fs::read(temp_dir.path().join("piece-range")).unwrap();
+    let file_content = std::fs::read(temp_dir.path().join("segment-range")).unwrap();
     assert_eq!(file_content, body);
 }
 
 #[tokio::test]
-async fn test_download_piece_cancellation() {
+async fn test_download_segment_cancellation() {
     let server = MockServer::start().await;
 
     // Respond with a delay so we have time to cancel
@@ -259,13 +259,13 @@ async fn test_download_piece_cancellation() {
     let temp_dir = tempfile::tempdir().unwrap();
     let cancel_token = CancellationToken::new();
 
-    let piece = Piece::new("piece-cancel".to_string(), 0, -1);
+    let segment = Segment::new("segment-cancel".to_string(), 0, -1);
 
     // Cancel immediately before download starts
     cancel_token.cancel();
 
-    let result = download_piece(
-        piece,
+    let result = download_segment(
+        segment,
         &client,
         &header_data,
         temp_dir.path().to_path_buf(),
@@ -282,17 +282,17 @@ async fn test_download_piece_cancellation() {
 }
 
 #[tokio::test]
-async fn test_download_piece_retries_on_failure() {
+async fn test_download_segment_retries_on_failure() {
     let client = Client::new();
     // Point to a port nothing is listening on — immediate connection refused
     let header_data = Arc::new(make_header_data("http://127.0.0.1:1"));
     let temp_dir = tempfile::tempdir().unwrap();
     let cancel_token = CancellationToken::new();
 
-    let piece = Piece::new("piece-retry".to_string(), 0, -1);
+    let segment = Segment::new("segment-retry".to_string(), 0, -1);
 
-    let result = download_piece(
-        piece,
+    let result = download_segment(
+        segment,
         &client,
         &header_data,
         temp_dir.path().to_path_buf(),
@@ -309,7 +309,7 @@ async fn test_download_piece_retries_on_failure() {
 }
 
 #[tokio::test]
-async fn test_download_piece_progress_callback_called() {
+async fn test_download_segment_progress_callback_called() {
     let server = MockServer::start().await;
     let body = vec![0xEFu8; 2048];
 
@@ -323,13 +323,13 @@ async fn test_download_piece_progress_callback_called() {
     let temp_dir = tempfile::tempdir().unwrap();
     let cancel_token = CancellationToken::new();
 
-    let piece = Piece::new("piece-progress".to_string(), 0, -1);
+    let segment = Segment::new("segment-progress".to_string(), 0, -1);
 
     let total_progress = Arc::new(AtomicU64::new(0));
     let total_progress_clone = total_progress.clone();
 
-    let result = download_piece(
-        piece,
+    let result = download_segment(
+        segment,
         &client,
         &header_data,
         temp_dir.path().to_path_buf(),

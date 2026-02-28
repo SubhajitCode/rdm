@@ -231,7 +231,7 @@ impl CollectingObserver {
 #[async_trait]
 impl ProgressObserver for CollectingObserver {
     async fn on_progress(&self, snapshot: &ProgressSnapshot) {
-        let delta: u64 = snapshot.pieces.iter().map(|p| p.bytes_downloaded).sum();
+        let delta: u64 = snapshot.segments.iter().map(|p| p.bytes_downloaded).sum();
         *self.total_bytes.lock().unwrap() = delta;
         *self.event_count.lock().unwrap() += 1;
     }

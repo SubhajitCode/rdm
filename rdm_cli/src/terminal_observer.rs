@@ -7,11 +7,11 @@ use rdm_core::progress::snapshot::{format_bytes, ProgressSnapshot};
 
 /// Renders download progress as indicatif terminal bars.
 ///
-/// One `ProgressBar` is created per piece, plus a total bar.
+/// One `ProgressBar` is created per segment, plus a total bar.
 /// All bars live under a shared `MultiProgress` so they render cleanly.
 pub struct TerminalProgressObserver {
     multi: MultiProgress,
-    /// piece_id → ProgressBar (lazily initialised on first `on_progress` call)
+    /// segment_id → ProgressBar (lazily initialised on first `on_progress` call)
     bars: Mutex<HashMap<String, ProgressBar>>,
     /// The aggregate total bar
     total_bar: Mutex<Option<ProgressBar>>,
@@ -26,24 +26,24 @@ impl TerminalProgressObserver {
         }
     }
 
-    /// Ensure all per-piece bars and the total bar exist for the given snapshot.
+    /// Ensure all per-segment bars and the total bar exist for the given snapshot.
     fn ensure_bars(&self, snapshot: &ProgressSnapshot) {
         let mut bars = self.bars.lock().unwrap();
         let mut total_bar = self.total_bar.lock().unwrap();
 
-        // Per-piece bars
-        for piece in &snapshot.pieces {
-            if !bars.contains_key(&piece.piece_id) {
+        // Per-segment bars
+        for segment in &snapshot.segments {
+            if !bars.contains_key(&segment.segment_id) {
                 let style = ProgressStyle::with_template(
                     "[{bar:30.cyan/blue}] {bytes}/{total_bytes} ({binary_bytes_per_sec}) ETA {eta} — {msg}",
                 )
                 .unwrap()
                 .progress_chars("=>-");
 
-                let pb = self.multi.add(ProgressBar::new(piece.total_bytes.max(1)));
+                let pb = self.multi.add(ProgressBar::new(segment.total_bytes.max(1)));
                 pb.set_style(style);
-                pb.set_message(piece.piece_id.clone());
-                bars.insert(piece.piece_id.clone(), pb);
+                pb.set_message(segment.segment_id.clone());
+                bars.insert(segment.segment_id.clone(), pb);
             }
         }
 
@@ -65,10 +65,10 @@ impl TerminalProgressObserver {
         let bars = self.bars.lock().unwrap();
         let total_bar = self.total_bar.lock().unwrap();
 
-        for piece in &snapshot.pieces {
-            if let Some(pb) = bars.get(&piece.piece_id) {
-                pb.set_length(piece.total_bytes.max(1));
-                pb.set_position(piece.bytes_downloaded);
+        for segment in &snapshot.segments {
+            if let Some(pb) = bars.get(&segment.segment_id) {
+                pb.set_length(segment.total_bytes.max(1));
+                pb.set_position(segment.bytes_downloaded);
             }
         }
 
@@ -82,9 +82,9 @@ impl TerminalProgressObserver {
         let bars = self.bars.lock().unwrap();
         let total_bar = self.total_bar.lock().unwrap();
 
-        for piece in &snapshot.pieces {
-            if let Some(pb) = bars.get(&piece.piece_id) {
-                pb.finish_with_message(format!("{} done", piece.piece_id));
+        for segment in &snapshot.segments {
+            if let Some(pb) = bars.get(&segment.segment_id) {
+                pb.finish_with_message(format!("{} done", segment.segment_id));
             }
         }
 

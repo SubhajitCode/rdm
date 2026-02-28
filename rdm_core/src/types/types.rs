@@ -16,7 +16,7 @@ pub enum StreamType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Piece {
+pub struct Segment {
     pub id: String,
     pub offset: i64,
     pub length: i64,
@@ -25,7 +25,7 @@ pub struct Piece {
     pub stream_type: StreamType,
 }
 
-impl Piece {
+impl Segment {
     pub fn new(id: String, offset: i64, length: i64) -> Self {
         Self {
             id,
@@ -103,13 +103,13 @@ pub enum DownloadError {
     NonResumable,
     #[error("cancelled")]
     Cancelled,
-    #[error("piece failed: {0}")]
-    PieceFailed(String),
+    #[error("segment failed: {0}")]
+    SegmentFailed(String),
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProgressEvent {
-    pub piece_id: String,
+    pub segment_id: String,
     pub bytes_delta: u64,
     pub total_bytes: Option<u64>,
 }

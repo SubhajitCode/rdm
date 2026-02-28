@@ -16,13 +16,13 @@ The project is structured as a Cargo workspace with three crates and companion b
 
 ## Features
 
-- **Parallel downloads** — splits files into up to 8 concurrent pieces using HTTP `Range` requests
-- **Smart piece splitting** — XDM-style dynamic binary halving (minimum piece size: 256 KB)
+- **Parallel downloads** — splits files into up to 8 concurrent segments using HTTP `Range` requests
+- **Smart segment splitting** — XDM-style dynamic binary halving (minimum segment size: 256 KB)
 - **Server probing** — detects file size, resumability, filename from `Content-Disposition`, content type, `Last-Modified`, and final URL after redirects before downloading
 - **Graceful fallback** — falls back to a single-connection download when the server does not support range requests
-- **Retry with backoff** — automatically retries failed pieces with exponential backoff (up to 3 retries: 100 ms → 200 ms → 400 ms)
+- **Retry with backoff** — automatically retries failed segments with exponential backoff (up to 3 retries: 100 ms → 200 ms → 400 ms)
 - **Cancellation support** — cooperative cancellation via `CancellationToken`
-- **Real-time progress** — EMA-smoothed speed, per-piece and aggregate progress with bytes downloaded, speed, and ETA
+- **Real-time progress** — EMA-smoothed speed, per-segment and aggregate progress with bytes downloaded, speed, and ETA
 - **Browser extension integration** — the `rdmd` daemon receives media and download events from the browser extension, triggers downloads, and streams back progress via Server-Sent Events (SSE)
 - **Streaming media detection** — the browser extension monitors `webRequest` traffic and posts detected audio/video URLs to `rdmd`
 - **Download interception** — the extension cancels browser-native downloads for configured file types and hands them off to `rdmd`
@@ -199,7 +199,7 @@ rdm/
 ├── Cargo.toml                  # Workspace root
 ├── rdm_core/                   # Core download engine (library crate)
 │   └── src/
-│       ├── downloader/         # HttpDownloader, piece_grabber, strategies
+│       ├── downloader/         # HttpDownloader, segment_grabber, strategies
 │       ├── progress/           # ProgressObserver trait, notifier, snapshots
 │       └── types/              # Shared types and errors
 ├── rdm_cli/                    # CLI binary (rdm)

@@ -8,19 +8,19 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::downloader::piece_grabber::{download_piece, probe_url};
+use crate::downloader::segment_grabber::{download_segment, probe_url};
 use crate::downloader::strategy::download_strategy::DownloadStrategy;
-use crate::types::types::{AuthenticationInfo, DownloadError, DownloaderState, HeaderData, Piece, ProgressEvent, ProxyInfo, SegmentState};
+use crate::types::types::{AuthenticationInfo, DownloadError, DownloaderState, HeaderData, Segment, ProgressEvent, ProxyInfo, SegmentState};
 
 /// Default maximum number of concurrent download connections.
 const MAX_CONNECTIONS: usize = 8;
 
-/// Minimum piece size in bytes (256 KB). Pieces won't be split below this.
-const MIN_PIECE_SIZE: i64 = 256 * 1024;
+/// Minimum segment size in bytes (256 KB). Segments won't be split below this.
+const MIN_SEGMENT_SIZE: i64 = 256 * 1024;
 
 pub struct MultipartDownloadStrategy {
     state: Arc<StdRwLock<DownloaderState>>,
-    pieces: Arc<RwLock<HashMap<String, Piece>>>,
+    segments: Arc<RwLock<HashMap<String, Segment>>>,
     client: Arc<Client>,
     cancel_token: CancellationToken,
     /// Set by `HttpDownloader` just before `download()` runs.
@@ -55,7 +55,7 @@ impl MultipartDownloadStrategy {
                 attachment_name: None,
                 content_type: None,
             })),
-            pieces: Arc::new(RwLock::new(HashMap::new())),
+            segments: Arc::new(RwLock::new(HashMap::new())),
             client: Arc::new(
                 Client::builder()
                     .connect_timeout(std::time::Duration::from_secs(10))
@@ -88,9 +88,9 @@ impl MultipartDownloadStrategy {
         &self.state
     }
 
-    /// Returns a reference to the internal pieces lock (for testing/inspection).
-    pub fn pieces(&self) -> &Arc<RwLock<HashMap<String, Piece>>> {
-        &self.pieces
+    /// Returns a reference to the internal segments lock (for testing/inspection).
+    pub fn segments(&self) -> &Arc<RwLock<HashMap<String, Segment>>> {
+        &self.segments
     }
 
     /// Returns a reference to the cancellation token.
@@ -99,83 +99,83 @@ impl MultipartDownloadStrategy {
     }
 }
 
-/// Creates download pieces using XDM-style dynamic halving.
+/// Creates download segments using XDM-style dynamic halving.
 ///
-/// Starts with a single piece covering the entire file, then repeatedly
-/// splits the largest piece in half until we reach `max_connections` pieces
-/// or every piece is at the minimum size.
-fn create_pieces(file_size: u64, max_connections: usize) -> Vec<Piece> {
+/// Starts with a single segment covering the entire file, then repeatedly
+/// splits the largest segment in half until we reach `max_connections` segments
+/// or every segment is at the minimum size.
+fn create_segments(file_size: u64, max_connections: usize) -> Vec<Segment> {
     log::info!(
-        "[create_pieces] file_size={}, max_connections={}",
+        "[create_segments] file_size={}, max_connections={}",
         file_size,
         max_connections
     );
 
-    // Start with one piece covering the whole file
-    let mut pieces = vec![Piece::new(
+    // Start with one segment covering the whole file
+    let mut segments = vec![Segment::new(
         Uuid::new_v4().to_string(),
         0,
         file_size as i64,
     )];
 
-    // Repeatedly halve the largest piece
-    while pieces.len() < max_connections {
-        // Find the piece with the most bytes
-        let max_idx = pieces
+    // Repeatedly halve the largest segment
+    while segments.len() < max_connections {
+        // Find the segment with the most bytes
+        let max_idx = segments
             .iter()
             .enumerate()
-            .max_by_key(|(_, p)| p.length)
+            .max_by_key(|(_, s)| s.length)
             .map(|(i, _)| i)
             .unwrap();
 
-        let piece = &pieces[max_idx];
+        let segment = &segments[max_idx];
 
-        // Don't split if it would produce pieces below minimum size
-        if piece.length < MIN_PIECE_SIZE * 2 {
+        // Don't split if it would produce segments below minimum size
+        if segment.length < MIN_SEGMENT_SIZE * 2 {
             log::debug!(
-                "[create_pieces] stopping split: largest piece length={} < MIN_PIECE_SIZE*2={}",
-                piece.length,
-                MIN_PIECE_SIZE * 2
+                "[create_segments] stopping split: largest segment length={} < MIN_SEGMENT_SIZE*2={}",
+                segment.length,
+                MIN_SEGMENT_SIZE * 2
             );
             break;
         }
 
-        let half = piece.length / 2;
-        let new_offset = piece.offset + half;
-        let new_length = piece.length - half;
+        let half = segment.length / 2;
+        let new_offset = segment.offset + half;
+        let new_length = segment.length - half;
 
         log::debug!(
-            "[create_pieces] splitting piece[{}]: offset={}, length={} -> half={}, new_offset={}, new_length={}",
-            max_idx, piece.offset, piece.length, half, new_offset, new_length
+            "[create_segments] splitting segment[{}]: offset={}, length={} -> half={}, new_offset={}, new_length={}",
+            max_idx, segment.offset, segment.length, half, new_offset, new_length
         );
 
-        // Shrink the original piece
-        pieces[max_idx].length = half;
+        // Shrink the original segment
+        segments[max_idx].length = half;
 
-        // Create the new piece for the second half
-        pieces.push(Piece::new(
+        // Create the new segment for the second half
+        segments.push(Segment::new(
             Uuid::new_v4().to_string(),
             new_offset,
             new_length,
         ));
     }
 
-    // Log final pieces summary
-    let total: i64 = pieces.iter().map(|p| p.length).sum();
+    // Log final segments summary
+    let total: i64 = segments.iter().map(|s| s.length).sum();
     log::info!(
-        "[create_pieces] created {} pieces, total_bytes={}, file_size={}",
-        pieces.len(),
+        "[create_segments] created {} segments, total_bytes={}, file_size={}",
+        segments.len(),
         total,
         file_size
     );
-    for (i, p) in pieces.iter().enumerate() {
+    for (i, s) in segments.iter().enumerate() {
         log::debug!(
-            "[create_pieces]   piece[{}]: offset={}, length={}, end={}",
-            i, p.offset, p.length, p.offset + p.length - 1
+            "[create_segments]   segment[{}]: offset={}, length={}, end={}",
+            i, s.offset, s.length, s.offset + s.length - 1
         );
     }
 
-    pieces
+    segments
 }
 
 /// Extracts HeaderData from the current DownloaderState.
@@ -204,7 +204,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
     }
 
     /// Probes the URL, determines file size and resumability, creates temp
-    /// directory, and splits the file into download pieces.
+    /// directory, and splits the file into download segments.
     async fn preprocess(&self) -> Result<(), DownloadError> {
         // 1. Build HeaderData from current state (sync lock)
         let header_data = build_header_data(&self.state)?;
@@ -233,43 +233,43 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             .await
             .map_err(DownloadError::Disk)?;
 
-        // 6. Create pieces based on probe results
-        let new_pieces = if resumable {
+        // 6. Create segments based on probe results
+        let new_segments = if resumable {
             if let Some(file_size) = resource_size {
                 log::info!(
-                    "[preprocess] resumable=true, file_size={}, creating multipart pieces with max_connections={}",
+                    "[preprocess] resumable=true, file_size={}, creating multipart segments with max_connections={}",
                     file_size, self.connections
                 );
-                create_pieces(file_size, self.connections)
+                create_segments(file_size, self.connections)
             } else {
-                log::info!("[preprocess] resumable=true but file_size unknown, using single piece");
-                vec![Piece::new(Uuid::new_v4().to_string(), 0, -1)]
+                log::info!("[preprocess] resumable=true but file_size unknown, using single segment");
+                vec![Segment::new(Uuid::new_v4().to_string(), 0, -1)]
             }
         } else {
-            log::info!("[preprocess] resumable=false, using single piece (full download)");
-            vec![Piece::new(Uuid::new_v4().to_string(), 0, -1)]
+            log::info!("[preprocess] resumable=false, using single segment (full download)");
+            vec![Segment::new(Uuid::new_v4().to_string(), 0, -1)]
         };
 
-        // 7. Store pieces
+        // 7. Store segments
         {
-            let mut pieces = self.pieces.write().await;
-            pieces.clear();
-            for piece in new_pieces {
-                pieces.insert(piece.id.clone(), piece);
+            let mut segments = self.segments.write().await;
+            segments.clear();
+            for segment in new_segments {
+                segments.insert(segment.id.clone(), segment);
             }
         }
 
         Ok(())
     }
 
-    /// Downloads all pieces concurrently. Each piece is downloaded in its own
+    /// Downloads all segments concurrently. Each segment is downloaded in its own
     /// tokio task. Waits for all tasks to complete and propagates errors.
     async fn download(&self) -> Result<(), DownloadError> {
-        // Snapshot the optional sender once — all piece tasks share a clone.
+        // Snapshot the optional sender once — all segment tasks share a clone.
         let progress_tx: Option<mpsc::Sender<Result<ProgressEvent, String>>> =
             self.progress_tx.lock().unwrap().clone();
 
-        // Wrap HeaderData in Arc — shared across all piece tasks without cloning
+        // Wrap HeaderData in Arc — shared across all segment tasks without cloning
         let header_data = Arc::new(build_header_data(&self.state)?);
 
         let temp_dir = {
@@ -277,54 +277,54 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             PathBuf::from(&s.temp_dir)
         };
 
-        // Collect all pieces that need downloading
-        let pieces_to_download: Vec<Piece> = {
-            let pieces_guard = self.pieces.read().await;
-            pieces_guard
+        // Collect all segments that need downloading
+        let segments_to_download: Vec<Segment> = {
+            let segments_guard = self.segments.read().await;
+            segments_guard
                 .values()
-                .filter(|p| p.state == SegmentState::NotStarted)
+                .filter(|s| s.state == SegmentState::NotStarted)
                 .cloned()
                 .collect()
         };
 
-        if pieces_to_download.is_empty() {
+        if segments_to_download.is_empty() {
             return Ok(());
         }
 
-        // No need to mark pieces as Downloading here — download_piece() does it
-        // at piece_grabber.rs:90, and the cloned copies in the HashMap are never
+        // No need to mark segments as Downloading here — download_segment() does it
+        // at segment_grabber.rs:90, and the cloned copies in the HashMap are never
         // read during the download phase.
 
-        // Spawn a tokio task for each piece — true concurrent downloads
-        let mut handles = Vec::with_capacity(pieces_to_download.len());
+        // Spawn a tokio task for each segment — true concurrent downloads
+        let mut handles = Vec::with_capacity(segments_to_download.len());
 
-        for piece in pieces_to_download {
+        for segment in segments_to_download {
             let client = Arc::clone(&self.client);
             let header_data = Arc::clone(&header_data); // cheap Arc clone
             let temp_dir = temp_dir.clone();
             let cancel_token = self.cancel_token.clone();
-            let piece_tx = progress_tx.clone();
-            let piece_id_for_progress = piece.id.clone();
-            let piece_id_for_handle = piece.id.clone();
-            let piece_total_bytes = if piece.length > 0 {
-                Some(piece.length as u64)
+            let segment_tx = progress_tx.clone();
+            let segment_id_for_progress = segment.id.clone();
+            let segment_id_for_handle = segment.id.clone();
+            let segment_total_bytes = if segment.length > 0 {
+                Some(segment.length as u64)
             } else {
                 None
             };
 
             let handle = tokio::spawn(async move {
-                download_piece(
-                    piece,
+                download_segment(
+                    segment,
                     &client,
                     &header_data,
                     temp_dir,
                     cancel_token,
                     |bytes_delta| {
-                        if let Some(tx) = &piece_tx {
+                        if let Some(tx) = &segment_tx {
                             let _ = tx.try_send(Ok(ProgressEvent {
-                                piece_id: piece_id_for_progress.clone(),
+                                segment_id: segment_id_for_progress.clone(),
                                 bytes_delta,
-                                total_bytes: piece_total_bytes,
+                                total_bytes: segment_total_bytes,
                             }));
                         }
                     },
@@ -332,10 +332,10 @@ impl DownloadStrategy for MultipartDownloadStrategy {
                 .await
             });
 
-            handles.push((piece_id_for_handle, handle));
+            handles.push((segment_id_for_handle, handle));
         }
 
-        // Wait for ALL tasks to complete, then update pieces in a single lock
+        // Wait for ALL tasks to complete, then update segments in a single lock
         let results: Vec<_> = futures::future::join_all(
             handles.into_iter().map(|(id, handle)| async move {
                 (id, handle.await)
@@ -343,34 +343,34 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         )
         .await;
 
-        let mut pieces_guard = self.pieces.write().await;
+        let mut segments_guard = self.segments.write().await;
         let mut first_error: Option<DownloadError> = None;
 
-        for (piece_id, result) in results {
+        for (segment_id, result) in results {
             match result {
-                Ok(Ok(updated_piece)) => {
-                    pieces_guard.insert(piece_id, updated_piece);
+                Ok(Ok(updated_segment)) => {
+                    segments_guard.insert(segment_id, updated_segment);
                 }
                 Ok(Err(e)) => {
-                    if let Some(p) = pieces_guard.get_mut(&piece_id) {
-                        p.state = SegmentState::Failed;
+                    if let Some(s) = segments_guard.get_mut(&segment_id) {
+                        s.state = SegmentState::Failed;
                     }
                     if first_error.is_none() {
                         first_error = Some(e);
                     }
                 }
                 Err(join_err) => {
-                    if let Some(p) = pieces_guard.get_mut(&piece_id) {
-                        p.state = SegmentState::Failed;
+                    if let Some(s) = segments_guard.get_mut(&segment_id) {
+                        s.state = SegmentState::Failed;
                     }
                     if first_error.is_none() {
-                        first_error = Some(DownloadError::PieceFailed(join_err.to_string()));
+                        first_error = Some(DownloadError::SegmentFailed(join_err.to_string()));
                     }
                 }
             }
         }
 
-        drop(pieces_guard);
+        drop(segments_guard);
 
         if let Some(e) = first_error {
             if let Some(tx) = &progress_tx {
@@ -384,7 +384,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
 
     async fn pause(&self) -> Result<(), DownloadError> {
         // Cancel the token to stop all in-flight downloads.
-        // On resume, a new token would be created and incomplete pieces restarted.
+        // On resume, a new token would be created and incomplete segments restarted.
         self.cancel_token.cancel();
         Ok(())
     }
@@ -394,29 +394,29 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         Ok(())
     }
 
-    /// Assembles all downloaded pieces into the final output file.
-    /// Sorts pieces by offset and concatenates their temp files.
+    /// Assembles all downloaded segments into the final output file.
+    /// Sorts segments by offset and concatenates their temp files.
     async fn postprocess(&self) -> Result<(), DownloadError> {
         // Extract all needed data under locks, then drop them before I/O
-        let (piece_ids, temp_dir, output_file) = {
-            let pieces = self.pieces.read().await;
+        let (segment_ids, temp_dir, output_file) = {
+            let segments = self.segments.read().await;
             let state = self.state.read().unwrap();
 
-            // Verify all pieces are finished
-            for piece in pieces.values() {
-                if piece.state != SegmentState::Finished {
-                    return Err(DownloadError::PieceFailed(format!(
-                        "piece {} is in state {:?}, expected Finished",
-                        piece.id, piece.state
+            // Verify all segments are finished
+            for segment in segments.values() {
+                if segment.state != SegmentState::Finished {
+                    return Err(DownloadError::SegmentFailed(format!(
+                        "segment {} is in state {:?}, expected Finished",
+                        segment.id, segment.state
                     )));
                 }
             }
 
-            // Sort pieces by offset
-            let mut sorted: Vec<_> = pieces.values().collect();
-            sorted.sort_by_key(|p| p.offset);
+            // Sort segments by offset
+            let mut sorted: Vec<_> = segments.values().collect();
+            sorted.sort_by_key(|s| s.offset);
 
-            let piece_ids: Vec<String> = sorted.iter().map(|p| p.id.clone()).collect();
+            let segment_ids: Vec<String> = sorted.iter().map(|s| s.id.clone()).collect();
             let temp_dir = state.temp_dir.clone();
 
             // Resolve the output file path:
@@ -438,7 +438,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
                 state.content_type.as_deref(),
             );
 
-            (piece_ids, temp_dir, output_file)
+            (segment_ids, temp_dir, output_file)
         }; // locks dropped here — not held during I/O
 
         // File assembly is CPU/IO bound — run on a blocking thread
@@ -449,39 +449,39 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             let mut output = File::create(&output_file)?;
             let mut total_assembled: u64 = 0;
 
-            for piece_id in &piece_ids {
-                let piece_path = PathBuf::from(&temp_dir).join(piece_id);
-                let piece_file_size = std::fs::metadata(&piece_path)?.len();
+            for segment_id in &segment_ids {
+                let segment_path = PathBuf::from(&temp_dir).join(segment_id);
+                let segment_file_size = std::fs::metadata(&segment_path)?.len();
                 log::info!(
-                    "[postprocess] assembling piece={}: file_size={} bytes",
-                    piece_id, piece_file_size
+                    "[postprocess] assembling segment={}: file_size={} bytes",
+                    segment_id, segment_file_size
                 );
-                total_assembled += piece_file_size;
+                total_assembled += segment_file_size;
 
-                let mut input = File::open(&piece_path)?;
+                let mut input = File::open(&segment_path)?;
                 std::io::copy(&mut input, &mut output)?;
             }
 
             output.flush()?;
 
             log::info!(
-                "[postprocess] assembly complete: total_assembled={} bytes across {} pieces, output={}",
+                "[postprocess] assembly complete: total_assembled={} bytes across {} segments, output={}",
                 total_assembled,
-                piece_ids.len(),
+                segment_ids.len(),
                 output_file
             );
 
             // Clean up temp files
-            for piece_id in &piece_ids {
-                let piece_path = PathBuf::from(&temp_dir).join(piece_id);
-                let _ = std::fs::remove_file(piece_path);
+            for segment_id in &segment_ids {
+                let segment_path = PathBuf::from(&temp_dir).join(segment_id);
+                let _ = std::fs::remove_file(segment_path);
             }
             let _ = std::fs::remove_dir(&temp_dir);
 
             Ok::<(), std::io::Error>(())
         })
         .await
-        .map_err(|e| DownloadError::PieceFailed(e.to_string()))?
+        .map_err(|e| DownloadError::SegmentFailed(e.to_string()))?
         .map_err(DownloadError::Disk)?;
 
         Ok(())
