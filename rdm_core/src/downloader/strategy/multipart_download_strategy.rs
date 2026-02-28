@@ -301,6 +301,11 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             let progress_tx = self.progress_tx.clone();
             let piece_id_for_progress = piece.id.clone();
             let piece_id_for_handle = piece.id.clone();
+            let piece_total_bytes = if piece.length > 0 {
+                Some(piece.length as u64)
+            } else {
+                None
+            };
 
             let handle = tokio::spawn(async move {
                 download_piece(
@@ -309,11 +314,11 @@ impl DownloadStrategy for MultipartDownloadStrategy {
                     &header_data,
                     temp_dir,
                     cancel_token,
-                    |bytes_downloaded| {
+                    |bytes_delta| {
                         let _ = progress_tx.try_send(ProgressEvent {
                             piece_id: piece_id_for_progress.clone(),
-                            bytes_downloaded,
-                            total_bytes: None,
+                            bytes_delta,
+                            total_bytes: piece_total_bytes,
                             speed: 0,
                             progress: 0,
                         });

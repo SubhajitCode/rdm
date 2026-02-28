@@ -1,9 +1,12 @@
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Path, State};
-use axum::http::Method;
+use axum::http::{Method, StatusCode};
+use axum::response::sse::{Event, Sse};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use tokio::sync::RwLock;
@@ -11,6 +14,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use rdm_core::downloader::http_downloader::HttpDownloader;
 use rdm_core::downloader::strategy::multipart_download_strategy::MultipartDownloadStrategy;
+use rdm_core::progress::{ProgressAggregator, ProgressSnapshot};
 
 use crate::path_sanitizer::safe_output_path;
 use crate::types::{
@@ -39,6 +43,7 @@ pub struct ActiveDownload {
     pub output_path: PathBuf,
     pub downloader:  Arc<HttpDownloader>,
     pub status:      DownloadStatus,
+    pub progress:    Arc<std::sync::RwLock<ProgressSnapshot>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -48,6 +53,7 @@ pub struct ActiveDownload {
 pub struct AppState {
     pub video_tracker: Arc<RwLock<VideoTracker>>,
     /// Active and recently completed downloads, keyed by video id.
+    /// TODO migrate to db or any other persistent storage
     pub downloads: Arc<RwLock<HashMap<String, ActiveDownload>>>,
 }
 
@@ -80,8 +86,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/vid",        post(vid_handler))
         .route("/clear",      post(clear_handler))
         // ── Internal / REST endpoints ────────────────────────────────────────
-        .route("/status/{id}", get(status_handler))
-        .route("/cancel/{id}", post(cancel_handler))
+        .route("/status/{id}",   get(status_handler))
+        .route("/progress/{id}", get(progress_handler))
+        .route("/cancel/{id}",   post(cancel_handler))
         .route("/videos",      get(videos_handler))
         .route("/videos/{id}", post(add_video_handler))
         .route("/videos/{id}", delete(remove_video_handler))
@@ -214,6 +221,7 @@ async fn download_handler(
     );
     // TODO: enqueue into rdm_core::HttpDownloader
 
+
     Json(sync_config(&state).await)
 }
 
@@ -245,7 +253,7 @@ async fn vid_handler(
 ) -> Json<SyncConfig> {
     let result = {
         let tracker = state.video_tracker.read().await;
-        tracker.trigger_download(&req.vid)
+        tracker.get_video(&req.vid)
     };
 
     match result {
@@ -267,6 +275,7 @@ async fn vid_handler(
         Err(err) => log::warn!("[vid] {}", err),
     }
 
+    //sync
     Json(sync_config(&state).await)
 }
 
@@ -310,8 +319,11 @@ fn spawn_download(item: VideoListItem, state: Arc<AppState>) {
         builder
     };
 
-    let (strategy, mut progress_rx) = builder.build();
+    let (strategy, progress_rx) = builder.build();
     let downloader = Arc::new(HttpDownloader::new(Arc::new(strategy)));
+
+    // Create the progress aggregator — drives terminal bars + shared snapshot.
+    let (aggregator, progress_snapshot) = ProgressAggregator::new();
 
     // Register the download in the shared map before spawning.
     let download_id = item.id.clone();
@@ -324,6 +336,7 @@ fn spawn_download(item: VideoListItem, state: Arc<AppState>) {
             output_path: output_path.clone(),
             downloader:  Arc::clone(&downloader),
             status:      DownloadStatus::Running,
+            progress:    Arc::clone(&progress_snapshot),
         };
         tokio::spawn(async move {
             state_clone.downloads.write().await.insert(dl.id.clone(), dl);
@@ -353,35 +366,13 @@ fn spawn_download(item: VideoListItem, state: Arc<AppState>) {
         }
     });
 
-    // Drain progress events so the channel doesn't back-pressure the downloader.
+    // Run the progress aggregator — drives indicatif terminal bars and
+    // keeps the shared ProgressSnapshot up to date for the SSE endpoint.
     tokio::spawn(async move {
-        while let Some(ev) = progress_rx.recv().await {
-            log::debug!(
-                "[vid] progress  piece={}  bytes={}",
-                ev.piece_id,
-                ev.bytes_downloaded,
-            );
-        }
+        aggregator.run(progress_rx).await;
     });
 }
 
-/// Convert the extension's header map (values are `serde_json::Value` arrays)
-/// into the `HashMap<String, Vec<String>>` expected by the builder.
-///
-/// The following headers are intentionally stripped:
-/// - **Hop-by-hop headers** (`Host`, `Connection`, `Keep-Alive`,
-///   `Transfer-Encoding`, `TE`, `Trailer`, `Upgrade`, `Proxy-*`) — these
-///   must never be forwarded to an upstream server per RFC 7230.
-/// - **`Cookie`** — carried separately in `HeaderData.cookies` and emitted
-///   by `apply_headers`; forwarding it here too produces a duplicate `Cookie`
-///   header that many servers reject with 400.
-/// - **`Accept-Encoding`** — reqwest manages compression negotiation itself
-///   (with auto-decompression disabled on the client); a second forwarded
-///   `Accept-Encoding` would create a duplicate and potentially corrupt the
-///   downloaded file by triggering transparent decompression mid-stream.
-/// - **`Content-Length`** / **`Content-Type`** on outgoing GET requests —
-///   browser-captured values relate to the *browser's* request, not rdm's
-///   replay, and can confuse the upstream server.
 fn json_headers_to_vec(
     headers: &HashMap<String, serde_json::Value>,
 ) -> HashMap<String, Vec<String>> {
@@ -389,7 +380,6 @@ fn json_headers_to_vec(
     fn is_blocked(key: &str) -> bool {
         matches!(
             key.to_lowercase().as_str(),
-            // Hop-by-hop (RFC 7230 §6.1)
             | "host"
             | "connection"
             | "keep-alive"
@@ -397,7 +387,6 @@ fn json_headers_to_vec(
             | "te"
             | "trailer"
             | "upgrade"
-            // Proxy-specific — never forwarded
             | "proxy-authorization"
             | "proxy-authenticate"
             | "proxy-connection"
@@ -492,6 +481,43 @@ async fn cancel_handler(
     } else {
         Json(serde_json::json!({ "id": id, "status": "not_found" }))
     }
+}
+
+/// GET /progress/:id — Server-Sent Events stream of download progress.
+///
+/// Emits a JSON `ProgressSnapshot` every 300ms until the download is done,
+/// then sends a final event and closes the stream.
+async fn progress_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
+    // Look up the download and clone the snapshot handle.
+    let snapshot = {
+        let downloads = state.downloads.read().await;
+        let dl = downloads.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+        Arc::clone(&dl.progress)
+    };
+
+    // Use async_stream to have full control over when the stream ends.
+    let stream = async_stream::stream! {
+        let mut interval = tokio::time::interval(Duration::from_millis(300));
+        loop {
+            interval.tick().await;
+            let snap = snapshot.read().unwrap().clone();
+            let is_done = snap.done;
+            let json = serde_json::to_string(&snap).unwrap_or_default();
+            yield Ok::<_, Infallible>(Event::default().data(json));
+            if is_done {
+                break;
+            }
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    ))
 }
 
 /// GET /videos

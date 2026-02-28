@@ -236,7 +236,7 @@ async fn test_http_downloader_progress_events_received() {
         let mut total: u64 = 0;
         let mut count: u64 = 0;
         while let Some(event) = rx.recv().await {
-            total += event.bytes_downloaded;
+            total += event.bytes_delta;
             count += 1;
         }
         (total, count)

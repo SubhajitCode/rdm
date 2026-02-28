@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 
 use rdm_core::downloader::http_downloader::HttpDownloader;
 use rdm_core::downloader::strategy::multipart_download_strategy::MultipartDownloadStrategy;
+use rdm_core::progress::ProgressAggregator;
 
 #[derive(Parser)]
 #[command(name = "rdm", about = "Rust Download Manager")]
@@ -28,7 +29,7 @@ async fn main() {
     let output_path = args.output;
 
     // Channel for progress events
-    let (progress_tx, mut progress_rx) = mpsc::channel(256);
+    let (progress_tx, progress_rx) = mpsc::channel(256);
 
     // Create the strategy and downloader
     let strategy = Arc::new(MultipartDownloadStrategy::new(
@@ -38,15 +39,12 @@ async fn main() {
     ));
     let downloader = HttpDownloader::new(strategy.clone());
 
-    // Spawn a task to print progress
+    // Create the progress aggregator — drives indicatif terminal bars.
+    let (aggregator, _snapshot) = ProgressAggregator::new();
+
+    // Spawn the progress aggregator task.
     let progress_handle = tokio::spawn(async move {
-        let mut total_downloaded: u64 = 0;
-        while let Some(event) = progress_rx.recv().await {
-            total_downloaded += event.bytes_downloaded;
-            let kb = total_downloaded as f64 / 1024.0;
-            eprint!("\r  Downloaded: {:.1} KB", kb);
-        }
-        eprintln!();
+        aggregator.run(progress_rx).await;
     });
 
     println!("Starting download: {}", url);
@@ -69,6 +67,6 @@ async fn main() {
         }
     }
 
-    // Wait for progress printer to drain
+    // Wait for progress aggregator to drain and print summary
     let _ = progress_handle.await;
 }

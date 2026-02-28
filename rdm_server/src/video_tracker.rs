@@ -19,7 +19,7 @@ impl VideoTracker {
 
     /// Look up a video by `id` and return a clone of its data.
     /// The caller is responsible for dispatching the actual download.
-    pub fn trigger_download(&self, id: &str) -> Result<VideoListItem, String> {
+    pub fn get_video(&self, id: &str) -> Result<VideoListItem, String> {
         match self.videos.get(id) {
             Some(item) => {
                 info!("VideoTracker::trigger_download: id={}", item.id);
