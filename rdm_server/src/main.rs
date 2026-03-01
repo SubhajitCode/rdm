@@ -25,7 +25,7 @@ fn osc8_link(abs_path: &str, line: u32) -> String {
 #[derive(Parser)]
 #[command(name = "rdmd", about = "Rust Download Manager")]
 struct Args{
-    #[arg(short, long)]
+    #[arg(long)]
     host: Option<String>,
     #[arg(short, long)]
     port: Option<String>,

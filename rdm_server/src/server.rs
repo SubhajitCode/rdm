@@ -18,7 +18,8 @@ use rdm_core::progress::snapshot::ProgressSnapshot;
 use crate::path_sanitizer::safe_output_path;
 use crate::sse_observer::SseProgressObserver;
 use crate::types::{
-    ExtensionData, MediaData, SyncConfig, TabUpdateData, VideoListItem, VidRequest,
+    DownloadRequest, DownloadResponse, MediaData, SyncConfig, TabUpdateData,
+    VideoListItem, VidRequest,
 };
 use crate::video_tracker::VideoTracker;
 
@@ -216,27 +217,45 @@ async fn media_handler(
 }
 
 /// POST /download
-/// Browser extension intercepted a file download and is handing it to rdm.
+/// Called by the Dioxus desktop UI after the user has chosen a save location.
+/// Queues the download and returns the download ID so the UI can subscribe
+/// to GET /progress/{id} for real-time progress updates.
 async fn download_handler(
     State(state): State<Arc<AppState>>,
-    Json(data): Json<ExtensionData>,
-) -> Json<SyncConfig> {
-    let filename = data
-        .filename
-        .or(data.file.clone())
-        .unwrap_or_else(|| filename_from_url(&data.url));
-
+    Json(req): Json<DownloadRequest>,
+) -> Json<DownloadResponse> {
     log::info!(
-        "[download] url=\"{}\"  file=\"{}\"  mime=\"{}\"  size={:?}",
-        data.url,
-        filename,
-        data.mime_type.as_deref().unwrap_or("-"),
-        data.file_size,
+        "[download] id=\"{}\"  url=\"{}\"  title=\"{}\"  output_path=\"{}\"",
+        req.id,
+        req.url,
+        req.title,
+        req.output_path,
     );
-    // TODO: enqueue into rdm_core::HttpDownloader
 
+    let id = req.id.clone();
 
-    Json(sync_config(&state).await)
+    // Build a VideoListItem from the DownloadRequest so we can reuse spawn_download.
+    let item = VideoListItem {
+        id:               req.id,
+        text:             req.title,
+        info:             req.info,
+        tab_id:           String::new(),
+        url:              req.url,
+        cookie:           req.cookie,
+        request_headers:  req.request_headers,
+        response_headers: std::collections::HashMap::new(),
+        method:           None,
+        user_agent:       req.user_agent,
+        tab_url:          None,
+        referer:          req.referer,
+    };
+
+    spawn_download_to_path(item, req.output_path, Arc::clone(&state));
+
+    Json(DownloadResponse {
+        id,
+        status: "queued".to_string(),
+    })
 }
 
 /// POST /tab-update
@@ -260,7 +279,8 @@ async fn tab_update_handler(
 }
 
 /// POST /vid
-/// User clicked a detected video in the popup — trigger its download.
+/// User clicked a detected video in the popup — spawn the Dioxus UI so the
+/// user can choose a save location before the download starts.
 async fn vid_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<VidRequest>,
@@ -273,36 +293,57 @@ async fn vid_handler(
     match result {
         Ok(item) => {
             log::info!(
-                "[vid] triggering download  id=\"{}\"  url=\"{}\"  file=\"{}\"  mime=\"{}\"  cookie=\"{}\"  user_agent=\"{}\"  referer=\"{}\"  tab_url=\"{}\"  method=\"{}\"",
-                item.id,
-                item.url,
-                item.text,
-                item.info,
-                item.cookie,
-                item.user_agent.as_deref().unwrap_or("-"),
-                item.referer.as_deref().unwrap_or("-"),
-                item.tab_url.as_deref().unwrap_or("-"),
-                item.method.as_deref().unwrap_or("GET"),
+                "[vid] spawning UI for id=\"{}\"  url=\"{}\"  file=\"{}\"",
+                item.id, item.url, item.text,
             );
-            spawn_download(item, Arc::clone(&state));
+            spawn_ui_for_item(item);
         }
         Err(err) => log::warn!("[vid] {}", err),
     }
 
-    //sync
     Json(sync_config(&state).await)
 }
 
-/// Spawn a download task for the given `VideoListItem`.
+/// Spawn the `rdm_ui` desktop window for the given `VideoListItem`.
+/// The item JSON is passed as a CLI argument so the UI can display the
+/// video title/URL and let the user pick a save location before downloading.
+fn spawn_ui_for_item(item: VideoListItem) {
+    let item_json = match serde_json::to_string(&item) {
+        Ok(j) => j,
+        Err(e) => {
+            log::error!("[vid] failed to serialize item: {}", e);
+            return;
+        }
+    };
+
+    // Locate the rdm_ui binary relative to the running executable.
+    // In development (cargo run) the binary lives in the same target directory.
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let ui_bin = exe_dir.join("rdm_ui");
+
+    match std::process::Command::new(&ui_bin)
+        .arg("--video-json")
+        .arg(&item_json)
+        .spawn()
+    {
+        Ok(child) => log::info!("[vid] spawned rdm_ui pid={}", child.id()),
+        Err(e) => log::error!(
+            "[vid] failed to spawn rdm_ui at {:?}: {}. \
+             Make sure rdm_ui is built and in the same directory as rdmd.",
+            ui_bin, e
+        ),
+    }
+}
+
+/// Spawn a download task for the given `VideoListItem`, saving to `output_path`.
 /// The task runs in the background; the server response is not blocked.
 /// The `state` is used to register and update the download's status.
-fn spawn_download(item: VideoListItem, state: Arc<AppState>) {
-    // Determine a safe output path.
-    // `item.info` carries the Content-Type detected by the extension, which
-    // helps supply the correct extension when the tab title has none.
-    let mime = if item.info.is_empty() { None } else { Some(item.info.as_str()) };
-    let output_path = safe_output_path(&item.text, &item.url, mime);
-    log::info!("[vid] output_path={:?}", output_path);
+fn spawn_download_to_path(item: VideoListItem, output_path_str: String, state: Arc<AppState>) {
+    let output_path = std::path::PathBuf::from(&output_path_str);
+    log::info!("[download] output_path={:?}", output_path);
 
     // Convert request headers: HashMap<String, serde_json::Value (array)>
     // → HashMap<String, Vec<String>> as expected by the builder.
@@ -310,7 +351,8 @@ fn spawn_download(item: VideoListItem, state: Arc<AppState>) {
 
     // Build the strategy via the builder.
     let builder = MultipartDownloadStrategy::builder(item.url.clone(), output_path.clone())
-        .with_headers(req_headers).with_connection_size(state.connections);
+        .with_headers(req_headers)
+        .with_connection_size(state.connections);
 
     // Set cookies if present.
     let builder = if !item.cookie.is_empty() {
@@ -358,8 +400,7 @@ fn spawn_download(item: VideoListItem, state: Arc<AppState>) {
         });
     }
 
-    // Spawn the download task. `HttpDownloader::download()` runs the notifier
-    // internally, so no external channel or notifier spawn is needed.
+    // Spawn the download task.
     let state_for_done = Arc::clone(&state);
     let id_for_done    = download_id.clone();
     let url_for_log    = download_url.clone();
@@ -375,18 +416,18 @@ fn spawn_download(item: VideoListItem, state: Arc<AppState>) {
         };
 
         let Some(downloader_arc) = downloader_arc else {
-            log::error!("[vid] download entry missing for id={}", id_for_done);
+            log::error!("[download] download entry missing for id={}", id_for_done);
             return;
         };
 
         let result = downloader_arc.lock().await.download().await;
         let new_status = match &result {
             Ok(()) => {
-                log::info!("[vid] download complete  url=\"{}\"  path={:?}", url_for_log, output_path);
+                log::info!("[download] complete  url=\"{}\"  path={:?}", url_for_log, output_path);
                 DownloadStatus::Complete
             }
             Err(e) => {
-                log::error!("[vid] download failed  url=\"{}\"  err={:?}", url_for_log, e);
+                log::error!("[download] failed  url=\"{}\"  err={:?}", url_for_log, e);
                 DownloadStatus::Failed
             }
         };
@@ -394,6 +435,18 @@ fn spawn_download(item: VideoListItem, state: Arc<AppState>) {
             entry.status = new_status;
         }
     });
+}
+
+/// Spawn a download task for the given `VideoListItem`.
+/// Auto-derives the output path from the item title and mime type.
+/// Kept for potential future use (e.g. headless mode).
+#[allow(dead_code)]
+fn spawn_download(item: VideoListItem, state: Arc<AppState>) {
+    let mime = if item.info.is_empty() { None } else { Some(item.info.as_str()) };
+    let output_path = safe_output_path(&item.text, &item.url, mime);
+    log::info!("[vid] output_path={:?}", output_path);
+    let output_path_str = output_path.to_string_lossy().to_string();
+    spawn_download_to_path(item, output_path_str, state);
 }
 
 fn json_headers_to_vec(
@@ -597,6 +650,7 @@ fn uuid_from_url(url: &str) -> String {
 }
 
 /// Extract the last path segment from a URL as a filename fallback.
+#[allow(dead_code)]
 fn filename_from_url(url: &str) -> String {
     url.rsplit('/')
         .find(|s| !s.is_empty())

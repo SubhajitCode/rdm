@@ -30,6 +30,47 @@ pub struct ExtensionData {
     pub tab_url: Option<String>,
     #[serde(rename = "tabId")]
     pub tab_id: Option<String>,
+    /// Full absolute output path chosen by the user in the desktop UI.
+    /// When present, overrides the auto-derived output path.
+    #[serde(rename = "outputPath")]
+    pub output_path: Option<String>,
+}
+
+/// Payload POSTed by the Dioxus desktop UI on /download.
+/// Contains the video item details and the user-chosen output path.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct DownloadRequest {
+    /// Video item ID (hash of URL, used to key the download in AppState).
+    pub id: String,
+    /// Media URL to download.
+    pub url: String,
+    /// Human-readable title (used in UI and for the default filename).
+    pub title: String,
+    /// Full absolute path where the file should be saved.
+    #[serde(rename = "outputPath")]
+    pub output_path: String,
+    /// Cookie string, if any.
+    #[serde(default)]
+    pub cookie: String,
+    /// Request headers captured by the browser extension.
+    #[serde(default, rename = "requestHeaders")]
+    pub request_headers: HashMap<String, serde_json::Value>,
+    /// Optional User-Agent.
+    #[serde(rename = "userAgent")]
+    pub user_agent: Option<String>,
+    /// Optional Referer.
+    pub referer: Option<String>,
+    /// Content-Type / mime info string.
+    #[serde(default)]
+    pub info: String,
+}
+
+/// Response returned by POST /download once the download has been queued.
+#[derive(Debug, Serialize)]
+pub struct DownloadResponse {
+    /// The download ID — use this to subscribe to GET /progress/{id} and POST /cancel/{id}.
+    pub id: String,
+    pub status: String,
 }
 
 /// Payload POSTed by the extension on /media (detected streaming media).

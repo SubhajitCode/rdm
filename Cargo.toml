@@ -3,6 +3,7 @@ members = [
     "rdm_core",
     "rdm_server",
     "rdm_cli",
+    "rdm_ui",
 ]
 resolver = "2"
 

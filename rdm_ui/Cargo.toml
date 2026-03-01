@@ -1,0 +1,20 @@
+[package]
+name = "rdm_ui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rdm_ui"
+path = "src/main.rs"
+
+[dependencies]
+dioxus          = { version = "0.6", features = ["desktop"] }
+serde           = { version = "1.0", features = ["derive"] }
+serde_json      = "1.0"
+tokio           = { version = "1", features = ["rt-multi-thread", "macros"] }
+reqwest         = { version = "0.12", features = ["json", "stream"] }
+rfd             = "0.15"
+futures         = "0.3"
+log             = "0.4"
+env_logger      = "0.11"
+dirs            = "5"
