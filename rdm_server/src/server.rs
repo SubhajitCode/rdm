@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::io::Write;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -305,8 +307,10 @@ async fn vid_handler(
 }
 
 /// Spawn the `rdm_ui` desktop window for the given `VideoListItem`.
-/// The item JSON is passed as a CLI argument so the UI can display the
-/// video title/URL and let the user pick a save location before downloading.
+///
+/// The video item JSON is written to the child's **stdin** and the pipe is
+/// closed immediately.  This avoids exposing cookies/headers in the process
+/// list (`ps aux`) that would happen if we passed JSON as a CLI argument.
 fn spawn_ui_for_item(item: VideoListItem) {
     let item_json = match serde_json::to_string(&item) {
         Ok(j) => j,
@@ -316,26 +320,72 @@ fn spawn_ui_for_item(item: VideoListItem) {
         }
     };
 
-    // Locate the rdm_ui binary relative to the running executable.
-    // In development (cargo run) the binary lives in the same target directory.
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let ui_bin = exe_dir.join("rdm_ui");
+    let ui_bin = find_ui_binary();
 
-    match std::process::Command::new(&ui_bin)
-        .arg("--video-json")
-        .arg(&item_json)
+    let mut child = match std::process::Command::new(&ui_bin)
+        .stdin(Stdio::piped())
         .spawn()
     {
-        Ok(child) => log::info!("[vid] spawned rdm_ui pid={}", child.id()),
-        Err(e) => log::error!(
-            "[vid] failed to spawn rdm_ui at {:?}: {}. \
-             Make sure rdm_ui is built and in the same directory as rdmd.",
-            ui_bin, e
-        ),
+        Ok(c) => {
+            log::info!("[vid] spawned rdm_ui pid={} from {:?}", c.id(), ui_bin);
+            c
+        }
+        Err(e) => {
+            log::error!(
+                "[vid] failed to spawn rdm_ui at {:?}: {}. \
+                 Make sure rdm_ui is built and either in the same directory as \
+                 rdmd or on PATH.",
+                ui_bin, e
+            );
+            return;
+        }
+    };
+
+    // Write the JSON to stdin then drop the handle to signal EOF.
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(e) = stdin.write_all(item_json.as_bytes()) {
+            log::error!("[vid] failed to write to rdm_ui stdin: {}", e);
+        }
+        // `stdin` is dropped here — EOF is sent to the child.
     }
+}
+
+/// Locate the `rdm_ui` binary.
+///
+/// Search order:
+/// 1. Same directory as the currently running `rdmd` executable (covers both
+///    `cargo run` / `cargo build` and co-installed release binaries).
+/// 2. Every directory in `PATH` (covers `cargo install` and manual installs
+///    where the user puts `rdm_ui` somewhere on their PATH).
+///
+/// Appends `.exe` automatically on Windows.
+fn find_ui_binary() -> PathBuf {
+    let bin_name = if cfg!(windows) { "rdm_ui.exe" } else { "rdm_ui" };
+
+    // 1. Same directory as rdmd.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join(bin_name);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+
+    // 2. Search PATH.
+    if let Ok(path_var) = std::env::var("PATH") {
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        for dir in path_var.split(sep) {
+            let candidate = PathBuf::from(dir).join(bin_name);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+
+    // Fall back to bare name and let the OS resolve it (will produce a clear
+    // error in the spawn() call if it cannot be found).
+    PathBuf::from(bin_name)
 }
 
 /// Spawn a download task for the given `VideoListItem`, saving to `output_path`.

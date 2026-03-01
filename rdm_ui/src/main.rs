@@ -11,10 +11,10 @@ use std::sync::OnceLock;
 static VIDEO_ITEM: OnceLock<VideoItem> = OnceLock::new();
 
 fn main() {
-    // Parse the --video-json argument passed by rdmd when it spawns us.
-    let args: Vec<String> = std::env::args().collect();
-    let video = parse_video_from_args(&args).unwrap_or_else(|e| {
-        eprintln!("[rdm_ui] failed to parse video args: {}", e);
+    // rdmd writes the VideoItem JSON to our stdin and closes the pipe.
+    // We read it all before launching the Dioxus event loop.
+    let video = read_video_from_stdin().unwrap_or_else(|e| {
+        eprintln!("[rdm_ui] {}", e);
         std::process::exit(1);
     });
 
@@ -41,19 +41,16 @@ fn root() -> Element {
     }
 }
 
-/// Parse the video item from CLI args.
-/// Accepts:
-///   rdm_ui --video-json '<json>'
-fn parse_video_from_args(args: &[String]) -> Result<VideoItem, String> {
-    let mut iter = args.iter().skip(1); // skip binary name
-    while let Some(arg) = iter.next() {
-        if arg == "--video-json" {
-            let json = iter
-                .next()
-                .ok_or_else(|| "--video-json requires a value".to_string())?;
-            return serde_json::from_str::<VideoItem>(json)
-                .map_err(|e| format!("invalid JSON: {}", e));
-        }
-    }
-    Err("Usage: rdm_ui --video-json '<json>'".to_string())
+/// Read the full stdin until EOF, then deserialise as a `VideoItem`.
+///
+/// rdmd writes the JSON and closes the pipe; we block here until EOF so we
+/// have the complete payload before the Dioxus event loop starts.
+fn read_video_from_stdin() -> Result<VideoItem, String> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .map_err(|e| format!("failed to read stdin: {}", e))?;
+    serde_json::from_str(buf.trim())
+        .map_err(|e| format!("invalid JSON from stdin: {}\nraw: {}", e, buf))
 }
