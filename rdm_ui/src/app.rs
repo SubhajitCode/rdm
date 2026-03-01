@@ -303,6 +303,12 @@ fn derive_filename(title: &str, url: &str, mime: &str) -> String {
         .or_else(|| ext_from_url(url))
         .unwrap_or("mp4");
 
+    let base = if base.chars().count() > 50 {
+        base.chars().take(50).collect::<String>().trim_end().to_string()
+    } else {
+        base
+    };
+
     if base.ends_with(&format!(".{}", ext)) { base } else { format!("{}.{}", base, ext) }
 }
 
