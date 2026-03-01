@@ -12,7 +12,6 @@ use crate::downloader::segment_grabber::{download_segment, probe_url};
 use crate::downloader::strategy::download_strategy::DownloadStrategy;
 use crate::types::types::{AuthenticationInfo, DownloadError, DownloaderState, HeaderData, Segment, ProgressEvent, ProxyInfo, SegmentState};
 
-/// Default maximum number of concurrent download connections.
 const MAX_CONNECTIONS: usize = 8;
 
 /// Minimum segment size in bytes (256 KB). Segments won't be split below this.
@@ -23,7 +22,6 @@ pub struct MultipartDownloadStrategy {
     segments: Arc<RwLock<HashMap<String, Segment>>>,
     client: Arc<Client>,
     cancel_token: CancellationToken,
-    /// Set by `HttpDownloader` just before `download()` runs.
     /// `None` while no progress consumer is attached (events are silently dropped).
     progress_tx: StdMutex<Option<mpsc::Sender<Result<ProgressEvent, String>>>>,
     connections: usize,
@@ -77,23 +75,19 @@ impl MultipartDownloadStrategy {
         MultipartDownloadStrategyBuilder::new(url,path)
     }
 
-    /// Returns the temp directory path from the current state, if available.
     pub async fn temp_dir(&self) -> String {
         let state = self.state.read().unwrap();
         state.temp_dir.clone()
     }
 
-    /// Returns a reference to the internal state lock (for testing/inspection).
     pub fn state(&self) -> &Arc<StdRwLock<DownloaderState>> {
         &self.state
     }
 
-    /// Returns a reference to the internal segments lock (for testing/inspection).
     pub fn segments(&self) -> &Arc<RwLock<HashMap<String, Segment>>> {
         &self.segments
     }
 
-    /// Returns a reference to the cancellation token.
     pub fn cancel_token(&self) -> &CancellationToken {
         &self.cancel_token
     }
@@ -111,16 +105,13 @@ fn create_segments(file_size: u64, max_connections: usize) -> Vec<Segment> {
         max_connections
     );
 
-    // Start with one segment covering the whole file
     let mut segments = vec![Segment::new(
         Uuid::new_v4().to_string(),
         0,
         file_size as i64,
     )];
 
-    // Repeatedly halve the largest segment
     while segments.len() < max_connections {
-        // Find the segment with the most bytes
         let max_idx = segments
             .iter()
             .enumerate()
@@ -130,7 +121,6 @@ fn create_segments(file_size: u64, max_connections: usize) -> Vec<Segment> {
 
         let segment = &segments[max_idx];
 
-        // Don't split if it would produce segments below minimum size
         if segment.length < MIN_SEGMENT_SIZE * 2 {
             log::debug!(
                 "[create_segments] stopping split: largest segment length={} < MIN_SEGMENT_SIZE*2={}",
@@ -149,10 +139,8 @@ fn create_segments(file_size: u64, max_connections: usize) -> Vec<Segment> {
             max_idx, segment.offset, segment.length, half, new_offset, new_length
         );
 
-        // Shrink the original segment
         segments[max_idx].length = half;
 
-        // Create the new segment for the second half
         segments.push(Segment::new(
             Uuid::new_v4().to_string(),
             new_offset,
@@ -160,7 +148,6 @@ fn create_segments(file_size: u64, max_connections: usize) -> Vec<Segment> {
         ));
     }
 
-    // Log final segments summary
     let total: i64 = segments.iter().map(|s| s.length).sum();
     log::info!(
         "[create_segments] created {} segments, total_bytes={}, file_size={}",
@@ -178,8 +165,6 @@ fn create_segments(file_size: u64, max_connections: usize) -> Vec<Segment> {
     segments
 }
 
-/// Extracts HeaderData from the current DownloaderState.
-/// Acquires the read lock once and copies all needed fields.
 fn build_header_data(
     state: &Arc<StdRwLock<DownloaderState>>,
 ) -> Result<HeaderData, DownloadError> {
@@ -203,20 +188,13 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         *self.progress_tx.lock().unwrap() = None;
     }
 
-    /// Probes the URL, determines file size and resumability, creates temp
-    /// directory, and splits the file into download segments.
     async fn preprocess(&self) -> Result<(), DownloadError> {
-        // 1. Build HeaderData from current state (sync lock)
         let header_data = build_header_data(&self.state)?;
-
-        // 2. Probe the URL
         let probe = probe_url(&self.client, &header_data).await?;
 
-        // 3. Extract Copy fields before moving probe
         let resumable = probe.resumable;
         let resource_size = probe.resource_size;
 
-        // 4. Update state with probe results (sync lock — no await while held)
         let temp_dir_path = {
             let mut s = self.state.write().unwrap();
             s.file_size = resource_size.map(|sz| sz as i64).unwrap_or(-1);
@@ -228,12 +206,10 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             s.temp_dir.clone()
         };
 
-        // 5. Create temp directory (async, non-blocking)
         tokio::fs::create_dir_all(&temp_dir_path)
             .await
             .map_err(DownloadError::Disk)?;
 
-        // 6. Create segments based on probe results
         let new_segments = if resumable {
             if let Some(file_size) = resource_size {
                 log::info!(
@@ -250,7 +226,6 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             vec![Segment::new(Uuid::new_v4().to_string(), 0, -1)]
         };
 
-        // 7. Store segments
         {
             let mut segments = self.segments.write().await;
             segments.clear();
@@ -262,14 +237,10 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         Ok(())
     }
 
-    /// Downloads all segments concurrently. Each segment is downloaded in its own
-    /// tokio task. Waits for all tasks to complete and propagates errors.
     async fn download(&self) -> Result<(), DownloadError> {
-        // Snapshot the optional sender once — all segment tasks share a clone.
         let progress_tx: Option<mpsc::Sender<Result<ProgressEvent, String>>> =
             self.progress_tx.lock().unwrap().clone();
 
-        // Wrap HeaderData in Arc — shared across all segment tasks without cloning
         let header_data = Arc::new(build_header_data(&self.state)?);
 
         let temp_dir = {
@@ -277,7 +248,6 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             PathBuf::from(&s.temp_dir)
         };
 
-        // Collect all segments that need downloading
         let segments_to_download: Vec<Segment> = {
             let segments_guard = self.segments.read().await;
             segments_guard
@@ -291,16 +261,13 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             return Ok(());
         }
 
-        // No need to mark segments as Downloading here — download_segment() does it
-        // at segment_grabber.rs:90, and the cloned copies in the HashMap are never
-        // read during the download phase.
-
-        // Spawn a tokio task for each segment — true concurrent downloads
+        // download_segment() marks segments as Downloading at segment_grabber.rs:90;
+        // the cloned copies in the HashMap are not read during the download phase.
         let mut handles = Vec::with_capacity(segments_to_download.len());
 
         for segment in segments_to_download {
             let client = Arc::clone(&self.client);
-            let header_data = Arc::clone(&header_data); // cheap Arc clone
+            let header_data = Arc::clone(&header_data);
             let temp_dir = temp_dir.clone();
             let cancel_token = self.cancel_token.clone();
             let segment_tx = progress_tx.clone();
@@ -335,7 +302,6 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             handles.push((segment_id_for_handle, handle));
         }
 
-        // Wait for ALL tasks to complete, then update segments in a single lock
         let results: Vec<_> = futures::future::join_all(
             handles.into_iter().map(|(id, handle)| async move {
                 (id, handle.await)
@@ -383,8 +349,6 @@ impl DownloadStrategy for MultipartDownloadStrategy {
     }
 
     async fn pause(&self) -> Result<(), DownloadError> {
-        // Cancel the token to stop all in-flight downloads.
-        // On resume, a new token would be created and incomplete segments restarted.
         self.cancel_token.cancel();
         Ok(())
     }
@@ -397,12 +361,10 @@ impl DownloadStrategy for MultipartDownloadStrategy {
     /// Assembles all downloaded segments into the final output file.
     /// Sorts segments by offset and concatenates their temp files.
     async fn postprocess(&self) -> Result<(), DownloadError> {
-        // Extract all needed data under locks, then drop them before I/O
         let (segment_ids, temp_dir, output_file) = {
             let segments = self.segments.read().await;
             let state = self.state.read().unwrap();
 
-            // Verify all segments are finished
             for segment in segments.values() {
                 if segment.state != SegmentState::Finished {
                     return Err(DownloadError::SegmentFailed(format!(
@@ -412,26 +374,20 @@ impl DownloadStrategy for MultipartDownloadStrategy {
                 }
             }
 
-            // Sort segments by offset
             let mut sorted: Vec<_> = segments.values().collect();
             sorted.sort_by_key(|s| s.offset);
 
             let segment_ids: Vec<String> = sorted.iter().map(|s| s.id.clone()).collect();
             let temp_dir = state.temp_dir.clone();
 
-            // Resolve the output file path:
-            //   1. Use the pre-computed output_path if set.
-            //   2. Fall back to the attachment_name from Content-Disposition.
-            //   3. Last resort: "download.bin".
+            // Resolve output path: pre-computed output_path → attachment_name → "download.bin".
             let base_output = state
                 .output_path
                 .clone()
                 .or_else(|| state.attachment_name.clone())
                 .unwrap_or_else(|| "download.bin".to_string());
 
-            // If the resolved path has no extension, try to add one from:
-            //   a) the attachment_name (Content-Disposition)
-            //   b) the content_type (MIME type)
+            // If the path has no extension, try to derive one from attachment_name or MIME type.
             let output_file = ensure_extension(
                 base_output,
                 state.attachment_name.as_deref(),
@@ -439,9 +395,8 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             );
 
             (segment_ids, temp_dir, output_file)
-        }; // locks dropped here — not held during I/O
+        };
 
-        // File assembly is CPU/IO bound — run on a blocking thread
         tokio::task::spawn_blocking(move || {
             use std::fs::File;
             use std::io::Write;
@@ -471,7 +426,6 @@ impl DownloadStrategy for MultipartDownloadStrategy {
                 output_file
             );
 
-            // Clean up temp files
             for segment_id in &segment_ids {
                 let segment_path = PathBuf::from(&temp_dir).join(segment_id);
                 let _ = std::fs::remove_file(segment_path);
@@ -502,10 +456,9 @@ fn ensure_extension(
 ) -> String {
     let pb = PathBuf::from(&path);
     if pb.extension().is_some() {
-        return path; // already has an extension
+        return path;
     }
 
-    // Try attachment_name extension first, then MIME type.
     let ext = attachment_name
         .and_then(|n| PathBuf::from(n).extension().map(|e| e.to_string_lossy().into_owned()))
         .or_else(|| ext_from_mime(content_type));
@@ -516,7 +469,6 @@ fn ensure_extension(
     }
 }
 
-/// Map a MIME type string to a file extension.
 fn ext_from_mime(content_type: Option<&str>) -> Option<String> {
     let mime = content_type?
         .split(';')
@@ -590,10 +542,8 @@ impl MultipartDownloadStrategyBuilder {
             let mut state = self.strategy.state.write().unwrap();
             let key = key.into();
             let value = value.into();
-            // Replace the existing value(s) for this key — using insert instead
-            // of push so that calling add_header("User-Agent", ua) never
-            // produces a duplicate when the key is already present in the
-            // captured request headers.
+            // insert() replaces any existing value for the key, preventing duplicates
+            // when the browser-captured request headers already contain the same key.
             state.headers.insert(key, vec![value]);
         }
         self

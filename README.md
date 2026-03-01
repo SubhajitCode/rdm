@@ -2,13 +2,14 @@
 
 A high-performance, multi-connection HTTP/HTTPS download manager written in Rust. `rdm` is a ground-up rewrite of [XDM (Xtreme Download Manager)](https://github.com/subhra74/xdm) from .NET/C# to Rust.
 
-The project is structured as a Cargo workspace with three crates and companion browser extensions:
+The project is structured as a Cargo workspace with four crates and companion browser extensions:
 
 | Component | Binary | Description |
 |-----------|--------|-------------|
 | `rdm_core` | — | Core download engine (library) |
 | `rdm_cli` | `rdm` | Command-line download tool |
 | `rdm_server` | `rdmd` | Local HTTP daemon for browser extension integration |
+| `rdm_ui` | `rdm_ui` | Dioxus desktop UI (save dialog + progress view) |
 | `rdm-chrome-extension` | — | Chrome/Chromium MV3 browser extension |
 | `rdm-firefox-extension` | — | Firefox MV3 browser extension |
 
@@ -23,7 +24,7 @@ The project is structured as a Cargo workspace with three crates and companion b
 - **Retry with backoff** — automatically retries failed segments with exponential backoff (up to 3 retries: 100 ms → 200 ms → 400 ms)
 - **Cancellation support** — cooperative cancellation via `CancellationToken`
 - **Real-time progress** — EMA-smoothed speed, per-segment and aggregate progress with bytes downloaded, speed, and ETA
-- **Browser extension integration** — the `rdmd` daemon receives media and download events from the browser extension, triggers downloads, and streams back progress via Server-Sent Events (SSE)
+- **Browser extension integration** — the `rdmd` daemon receives media and download events from the browser extension, spawns the `rdm_ui` desktop window for save-location selection, and streams back real-time progress via Server-Sent Events (SSE)
 - **Streaming media detection** — the browser extension monitors `webRequest` traffic and posts detected audio/video URLs to `rdmd`
 - **Download interception** — the extension cancels browser-native downloads for configured file types and hands them off to `rdmd`
 
@@ -46,9 +47,12 @@ cargo build --release
 Binaries will be placed at:
 
 ```
-./target/release/rdm     # CLI download tool
-./target/release/rdmd    # Browser extension daemon
+./target/release/rdm      # CLI download tool
+./target/release/rdmd     # Browser extension daemon
+./target/release/rdm_ui   # Desktop save/progress UI
 ```
+
+> **Note:** `rdmd` discovers `rdm_ui` by looking in the same directory as itself first, then falling back to `PATH`. For the extension flow to work, both binaries must be in the same directory or `rdm_ui` must be on `PATH`.
 
 ---
 
@@ -112,15 +116,61 @@ rdmd --host 127.0.0.1 --port 8597 --connections 8
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/sync` | Heartbeat — returns server config to the extension |
-| `POST` | `/download` | Start a new download |
+| `POST` | `/download` | Start a download (called by `rdm_ui` after save-location is chosen) |
 | `POST` | `/media` | Report a detected media URL |
-| `POST` | `/vid` | Report a detected video stream |
+| `POST` | `/vid` | User clicked a video in the popup — spawns `rdm_ui` |
 | `POST` | `/tab-update` | Report a tab navigation event |
 | `POST` | `/clear` | Clear the video list |
-| `GET` | `/status/{id}` | Get the current `ProgressSnapshot` for a download |
-| `GET` | `/progress/{id}` | SSE stream of progress events for a download |
+| `GET` | `/status/{id}` | Get the current status for a download |
+| `GET` | `/progress/{id}` | SSE stream of `ProgressSnapshot` events |
 | `POST` | `/cancel/{id}` | Cancel a running download |
 | `GET` | `/videos` | List detected streaming media |
+
+---
+
+## Desktop UI (`rdm_ui`)
+
+`rdm_ui` is a Dioxus desktop window spawned by `rdmd` when the user clicks a detected video in the browser extension popup. It is **not** launched directly by the user.
+
+### Flow
+
+```
+Browser extension popup
+  → POST /vid to rdmd
+    → rdmd spawns rdm_ui (VideoItem JSON sent via stdin pipe)
+      → View 1: user picks save location, clicks Download
+        → POST /download to rdmd
+          → View 2: real-time progress bar via GET /progress/{id} SSE
+            → Download complete → Close
+```
+
+### Testing in isolation
+
+```bash
+# 1. Start rdmd
+cargo run --bin rdmd
+
+# 2. Register a test video
+curl -s -X POST http://127.0.0.1:8597/videos/test123 \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"test123","text":"Test Video","info":"video/mp4","tabId":"1",
+       "url":"https://ash-speed.hetzner.com/100MB.bin",
+       "cookie":"","requestHeaders":{},"responseHeaders":{}}'
+
+# 3. Trigger the UI (same as clicking in the extension popup)
+curl -s -X POST http://127.0.0.1:8597/vid \
+  -H 'Content-Type: application/json' \
+  -d '{"vid":"test123"}'
+```
+
+Or pipe a VideoItem directly to the binary:
+
+```bash
+echo '{"id":"test","text":"My Video","info":"video/mp4","tabId":"1",
+       "url":"https://ash-speed.hetzner.com/100MB.bin",
+       "cookie":"","requestHeaders":{},"responseHeaders":{}}' \
+  | ./target/debug/rdm_ui
+```
 
 ---
 
@@ -211,7 +261,15 @@ rdm/
 │       ├── server.rs           # Axum router and all HTTP handlers
 │       ├── sse_observer.rs     # SSE progress push
 │       ├── video_tracker.rs    # In-memory detected media list
-│       └── path_sanitizer.rs  # Safe output path generation
+│       └── path_sanitizer.rs   # Safe output path generation
+├── rdm_ui/                     # Desktop UI binary (rdm_ui)
+│   ├── assets/
+│   │   └── app.css             # All UI styles (embedded at compile time)
+│   └── src/
+│       ├── main.rs             # Entry point — reads VideoItem from stdin, launches window
+│       ├── app.rs              # Dioxus components: App, FilePickerView, ProgressView
+│       ├── api.rs              # HTTP client — trigger_download, cancel_download, subscribe_progress
+│       └── styles.rs           # include_str! embed of assets/app.css
 ├── rdm-chrome-extension/       # Chrome MV3 extension
 └── rdm-firefox-extension/      # Firefox MV3 extension
 ```
@@ -222,9 +280,9 @@ rdm/
 
 - [x] Phase 1 — Core CLI download engine (multi-part, retry, cancellation)
 - [x] Phase 2 — Browser extension integration (local HTTP daemon, SSE, Chrome + Firefox)
-- [ ] Phase 3 — Dual-source downloads, HLS/DASH streaming, FFmpeg support
-- [ ] Phase 4 — SQLite persistence, download history, resume state
-- [ ] Phase 5 — GUI (Dioxus Desktop)
+- [x] Phase 3 — Desktop UI (Dioxus desktop, save-location picker, real-time progress view)
+- [ ] Phase 4 — Dual-source downloads, HLS/DASH streaming, FFmpeg support
+- [ ] Phase 5 — SQLite persistence, download history, resume state
 - [ ] Phase 6 — Clipboard monitoring, system tray, browser context menus
 - [ ] Phase 7 — Regression and stress testing
 - [ ] Phase 8 — Packaging (MSI, .deb, .rpm, DMG, Homebrew)

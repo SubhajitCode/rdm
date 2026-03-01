@@ -1,11 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-// ---------------------------------------------------------------------------
-// Shared types (mirror rdm_server's types for HTTP communication)
-// ---------------------------------------------------------------------------
-
-/// A detected streaming video item received from the server via CLI args.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VideoItem {
     pub id: String,
@@ -28,7 +23,6 @@ pub struct VideoItem {
     pub referer: Option<String>,
 }
 
-/// Request payload for POST /download.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadRequest {
     pub id: String,
@@ -47,14 +41,12 @@ pub struct DownloadRequest {
     pub info: String,
 }
 
-/// Response from POST /download.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadResponse {
     pub id: String,
     pub status: String,
 }
 
-/// A progress snapshot received via SSE.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgressSnapshot {
     pub total_bytes_downloaded: u64,
@@ -64,14 +56,8 @@ pub struct ProgressSnapshot {
     pub done: bool,
 }
 
-// ---------------------------------------------------------------------------
-// API client
-// ---------------------------------------------------------------------------
-
 const SERVER_BASE: &str = "http://127.0.0.1:8597";
 
-/// Trigger a download by calling POST /download on rdmd.
-/// Returns the download ID on success.
 pub async fn trigger_download(req: &DownloadRequest) -> Result<DownloadResponse, String> {
     let client = reqwest::Client::new();
     let resp = client
@@ -90,7 +76,6 @@ pub async fn trigger_download(req: &DownloadRequest) -> Result<DownloadResponse,
         .map_err(|e| format!("Parse error: {}", e))
 }
 
-/// Cancel an active download by calling POST /cancel/{id}.
 pub async fn cancel_download(id: &str) -> Result<(), String> {
     let client = reqwest::Client::new();
     client
@@ -101,9 +86,6 @@ pub async fn cancel_download(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Subscribe to progress updates via SSE (GET /progress/{id}).
-/// Calls `on_snapshot` with each new `ProgressSnapshot` until the download
-/// is done or the connection drops.
 pub async fn subscribe_progress<F>(id: &str, mut on_snapshot: F) -> Result<(), String>
 where
     F: FnMut(ProgressSnapshot),
@@ -124,15 +106,13 @@ where
         let chunk = chunk_result.map_err(|e| format!("SSE stream error: {}", e))?;
         buf.push_str(&String::from_utf8_lossy(&chunk));
 
-        // SSE lines are separated by \n; data lines start with "data:"
         loop {
             if let Some(newline_pos) = buf.find('\n') {
                 let line = buf[..newline_pos].trim().to_string();
                 buf = buf[newline_pos + 1..].to_string();
 
                 if let Some(json_str) = line.strip_prefix("data:") {
-                    let json_str = json_str.trim();
-                    if let Ok(snap) = serde_json::from_str::<ProgressSnapshot>(json_str) {
+                    if let Ok(snap) = serde_json::from_str::<ProgressSnapshot>(json_str.trim()) {
                         let done = snap.done;
                         on_snapshot(snap);
                         if done {

@@ -25,10 +25,6 @@ use crate::types::{
 };
 use crate::video_tracker::VideoTracker;
 
-// ---------------------------------------------------------------------------
-// Download tracking
-// ---------------------------------------------------------------------------
-
 /// Status of an active or completed download.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -39,7 +35,6 @@ pub enum DownloadStatus {
     Cancelled,
 }
 
-/// Entry stored in `AppState::downloads` for every dispatched download.
 pub struct ActiveDownload {
     pub id:          String,
     pub url:         String,
@@ -52,16 +47,10 @@ pub struct ActiveDownload {
     pub progress_rx: watch::Receiver<ProgressSnapshot>,
 }
 
-// ---------------------------------------------------------------------------
-// Shared application state
-// ---------------------------------------------------------------------------
-
 pub struct AppState {
     pub video_tracker: Arc<RwLock<VideoTracker>>,
-    /// Active and recently completed downloads, keyed by video id.
     /// TODO migrate to db or any other persistent storage
     pub downloads: Arc<RwLock<HashMap<String, ActiveDownload>>>,
-
     pub connections: usize,
 }
 
@@ -83,26 +72,19 @@ impl AppState {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Router
-// ---------------------------------------------------------------------------
-
 pub fn router(state: Arc<AppState>) -> Router {
-    // Allow requests from any chrome-extension:// origin (and localhost for dev).
     let cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers(Any)
         .allow_origin(Any);
 
     Router::new()
-        // ── Extension-facing endpoints (XDM-compatible) ─────────────────────
         .route("/sync",       get(sync_handler))
         .route("/media",      post(media_handler))
         .route("/download",   post(download_handler))
         .route("/tab-update", post(tab_update_handler))
         .route("/vid",        post(vid_handler))
         .route("/clear",      post(clear_handler))
-        // ── Internal / REST endpoints ────────────────────────────────────────
         .route("/status/{id}",   get(status_handler))
         .route("/progress/{id}", get(progress_handler))
         .route("/cancel/{id}",   post(cancel_handler))
@@ -114,35 +96,20 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-// ---------------------------------------------------------------------------
-// Helper — build the sync payload with the current video list
-// ---------------------------------------------------------------------------
-
 async fn sync_config(state: &Arc<AppState>) -> SyncConfig {
     let tracker = state.video_tracker.read().await;
     SyncConfig::default_with_videos(tracker.get_list())
 }
 
-// ---------------------------------------------------------------------------
-// Extension-facing handlers
-// ---------------------------------------------------------------------------
-
-/// GET /sync
-/// Heartbeat + config polling used by the extension's keep-alive alarms.
-/// Returns the current SyncConfig so the extension can refresh its state.
 async fn sync_handler(State(state): State<Arc<AppState>>) -> Json<SyncConfig> {
     log::debug!("GET /sync");
     Json(sync_config(&state).await)
 }
 
-/// POST /media
-/// Browser extension detected a streaming media request on a page.
-/// Logs the video to the console and stores it in the VideoTracker.
 async fn media_handler(
     State(state): State<Arc<AppState>>,
     Json(data): Json<MediaData>,
 ) -> Json<SyncConfig> {
-    // Derive a human-readable title: prefer tab title, fall back to URL.
     let title = data
         .file
         .as_deref()
@@ -150,7 +117,6 @@ async fn media_handler(
         .unwrap_or(data.url.as_str())
         .to_string();
 
-    // Derive extra info from response headers if available.
     let content_type = data
         .response_headers
         .get("Content-Type")
@@ -161,7 +127,6 @@ async fn media_handler(
         .unwrap_or("")
         .to_string();
 
-    // ── Console log ──────────────────────────────────────────────────────────
     log::info!(
         "[media] title=\"{}\"  url=\"{}\"  type=\"{}\"  tab_url=\"{}\"",
         title,
@@ -170,10 +135,8 @@ async fn media_handler(
         data.tab_url.as_deref().unwrap_or("-"),
     );
 
-    // Build a VideoListItem and store it.
     let id = uuid_from_url(&data.url);
 
-    // Extract Referer from request headers if present.
     let referer = data.request_headers
         .get("Referer")
         .or_else(|| data.request_headers.get("referer"))
@@ -218,10 +181,7 @@ async fn media_handler(
     Json(sync_config(&state).await)
 }
 
-/// POST /download
-/// Called by the Dioxus desktop UI after the user has chosen a save location.
-/// Queues the download and returns the download ID so the UI can subscribe
-/// to GET /progress/{id} for real-time progress updates.
+/// POST /download — called by the UI after the user chooses a save location.
 async fn download_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<DownloadRequest>,
@@ -236,7 +196,6 @@ async fn download_handler(
 
     let id = req.id.clone();
 
-    // Build a VideoListItem from the DownloadRequest so we can reuse spawn_download.
     let item = VideoListItem {
         id:               req.id,
         text:             req.title,
@@ -260,8 +219,6 @@ async fn download_handler(
     })
 }
 
-/// POST /tab-update
-/// Tab title changed on a watched URL — update matching video entries.
 async fn tab_update_handler(
     State(state): State<Arc<AppState>>,
     Json(data): Json<TabUpdateData>,
@@ -280,9 +237,7 @@ async fn tab_update_handler(
     Json(sync_config(&state).await)
 }
 
-/// POST /vid
-/// User clicked a detected video in the popup — spawn the Dioxus UI so the
-/// user can choose a save location before the download starts.
+/// POST /vid — user clicked a detected video; spawn the Dioxus UI for save-location picking.
 async fn vid_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<VidRequest>,
@@ -341,28 +296,23 @@ fn spawn_ui_for_item(item: VideoListItem) {
         }
     };
 
-    // Write the JSON to stdin then drop the handle to signal EOF.
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(e) = stdin.write_all(item_json.as_bytes()) {
             log::error!("[vid] failed to write to rdm_ui stdin: {}", e);
         }
-        // `stdin` is dropped here — EOF is sent to the child.
     }
 }
 
 /// Locate the `rdm_ui` binary.
 ///
 /// Search order:
-/// 1. Same directory as the currently running `rdmd` executable (covers both
-///    `cargo run` / `cargo build` and co-installed release binaries).
-/// 2. Every directory in `PATH` (covers `cargo install` and manual installs
-///    where the user puts `rdm_ui` somewhere on their PATH).
+/// 1. Same directory as the currently running `rdmd` executable.
+/// 2. Every directory in `PATH`.
 ///
 /// Appends `.exe` automatically on Windows.
 fn find_ui_binary() -> PathBuf {
     let bin_name = if cfg!(windows) { "rdm_ui.exe" } else { "rdm_ui" };
 
-    // 1. Same directory as rdmd.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let candidate = dir.join(bin_name);
@@ -372,7 +322,6 @@ fn find_ui_binary() -> PathBuf {
         }
     }
 
-    // 2. Search PATH.
     if let Ok(path_var) = std::env::var("PATH") {
         let sep = if cfg!(windows) { ';' } else { ':' };
         for dir in path_var.split(sep) {
@@ -383,42 +332,31 @@ fn find_ui_binary() -> PathBuf {
         }
     }
 
-    // Fall back to bare name and let the OS resolve it (will produce a clear
-    // error in the spawn() call if it cannot be found).
     PathBuf::from(bin_name)
 }
 
-/// Spawn a download task for the given `VideoListItem`, saving to `output_path`.
-/// The task runs in the background; the server response is not blocked.
-/// The `state` is used to register and update the download's status.
 fn spawn_download_to_path(item: VideoListItem, output_path_str: String, state: Arc<AppState>) {
     let output_path = PathBuf::from(&output_path_str);
     log::info!("[download] output_path={:?}", output_path);
 
-    // Convert request headers: HashMap<String, serde_json::Value (array)>
-    // → HashMap<String, Vec<String>> as expected by the builder.
     let req_headers = json_headers_to_vec(&item.request_headers);
 
-    // Build the strategy via the builder.
     let builder = MultipartDownloadStrategy::builder(item.url.clone(), output_path.clone())
         .with_headers(req_headers)
         .with_connection_size(state.connections);
 
-    // Set cookies if present.
     let builder = if !item.cookie.is_empty() {
         builder.with_cookies(item.cookie.clone())
     } else {
         builder
     };
 
-    // Inject User-Agent as an explicit header if provided and not already set.
     let builder = if let Some(ua) = &item.user_agent {
         builder.add_header("User-Agent", ua.clone())
     } else {
         builder
     };
 
-    // Inject Referer as an explicit header if provided and not already set.
     let builder = if let Some(referer) = &item.referer {
         builder.add_header("Referer", referer.clone())
     } else {
@@ -428,11 +366,9 @@ fn spawn_download_to_path(item: VideoListItem, output_path_str: String, state: A
     let strategy = builder.build();
     let mut downloader = HttpDownloader::new(Arc::new(strategy));
 
-    // Create the SSE observer and register it with the downloader.
     let (sse_observer, progress_watch_rx) = SseProgressObserver::new();
     downloader.add_observer(Box::new(sse_observer));
 
-    // Register the download in the shared map before spawning.
     let download_id = item.id.clone();
     let download_url = item.url.clone();
     {
@@ -450,12 +386,10 @@ fn spawn_download_to_path(item: VideoListItem, output_path_str: String, state: A
         });
     }
 
-    // Spawn the download task.
     let state_for_done = Arc::clone(&state);
     let id_for_done    = download_id.clone();
     let url_for_log    = download_url.clone();
     tokio::spawn(async move {
-        // Obtain an exclusive handle to the downloader from the shared map.
         let downloader_arc = {
             state_for_done
                 .downloads
@@ -487,7 +421,6 @@ fn spawn_download_to_path(item: VideoListItem, output_path_str: String, state: A
     });
 }
 
-/// Spawn a download task for the given `VideoListItem`.
 /// Auto-derives the output path from the item title and mime type.
 /// Kept for potential future use (e.g. headless mode).
 #[allow(dead_code)]
@@ -520,9 +453,8 @@ fn json_headers_to_vec(
             | "cookie"
             // Managed by reqwest (auto-decompression disabled on the client)
             | "accept-encoding"
-            // Managed by segment_grabber — rdm sets its own Range header per segment;
-            // a browser-captured Range would create a duplicate and cause the
-            // server to return the wrong byte range (or the full file).
+            // rdm sets its own Range header per segment; a browser-captured Range
+            // would create a duplicate and cause the server to return the wrong byte range.
             | "range"
             // Body-related — not relevant for rdm's GET replay
             | "content-length"
@@ -553,8 +485,6 @@ fn json_headers_to_vec(
         .collect()
 }
 
-/// POST /clear
-/// Clear all detected videos.
 async fn clear_handler(State(state): State<Arc<AppState>>) -> Json<SyncConfig> {
     {
         let mut tracker = state.video_tracker.write().await;
@@ -564,11 +494,6 @@ async fn clear_handler(State(state): State<Arc<AppState>>) -> Json<SyncConfig> {
     Json(sync_config(&state).await)
 }
 
-// ---------------------------------------------------------------------------
-// Internal REST handlers
-// ---------------------------------------------------------------------------
-
-/// GET /status/:id
 async fn status_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -586,7 +511,6 @@ async fn status_handler(
     }
 }
 
-/// POST /cancel/:id
 async fn cancel_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -617,7 +541,6 @@ async fn progress_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    // Clone the watch receiver for this SSE client.
     let mut rx = {
         let downloads = state.downloads.read().await;
         let dl = downloads.get(&id).ok_or(StatusCode::NOT_FOUND)?;
@@ -626,9 +549,7 @@ async fn progress_handler(
 
     let stream = async_stream::stream! {
         loop {
-            // Wait until a new snapshot is published.
             if rx.changed().await.is_err() {
-                // Sender dropped — download is over.
                 break;
             }
             let snap = rx.borrow_and_update().clone();
@@ -648,7 +569,6 @@ async fn progress_handler(
     ))
 }
 
-/// GET /videos
 async fn videos_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<Vec<VideoListItem>> {
@@ -656,7 +576,6 @@ async fn videos_handler(
     Json(tracker.get_list())
 }
 
-/// POST /videos/:id
 async fn add_video_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -668,7 +587,6 @@ async fn add_video_handler(
     Json(serde_json::json!({ "status": "ok" }))
 }
 
-/// DELETE /videos/:id
 async fn remove_video_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -686,11 +604,6 @@ async fn echo_handler(
     log::info!("echo {}",msg );
 }
 
-// ---------------------------------------------------------------------------
-// Utilities
-// ---------------------------------------------------------------------------
-
-/// Derive a stable ID from a URL (simple truncated hash).
 fn uuid_from_url(url: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -699,7 +612,6 @@ fn uuid_from_url(url: &str) -> String {
     format!("{:016x}", h.finish())
 }
 
-/// Extract the last path segment from a URL as a filename fallback.
 #[allow(dead_code)]
 fn filename_from_url(url: &str) -> String {
     url.rsplit('/')

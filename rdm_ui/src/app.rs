@@ -6,19 +6,11 @@ use crate::api::{
 };
 use crate::styles::APP_CSS;
 
-// ---------------------------------------------------------------------------
-// App state machine
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Debug, PartialEq)]
 enum View {
     FilePicker,
     Progress { download_id: String },
 }
-
-// ---------------------------------------------------------------------------
-// Root component
-// ---------------------------------------------------------------------------
 
 #[component]
 pub fn App(video: VideoItem) -> Element {
@@ -40,16 +32,13 @@ pub fn App(video: VideoItem) -> Element {
     }
 }
 
-// ---------------------------------------------------------------------------
-// View 1 — File picker
-// ---------------------------------------------------------------------------
-
 #[component]
 fn FilePickerView(video: VideoItem, mut view: Signal<View>) -> Element {
     let default_filename = derive_filename(&video.text, &video.url, video.info.as_str());
     let default_dir = dirs::download_dir()
         .or_else(dirs::home_dir)
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("rdm");
     let default_path = default_dir.join(&default_filename);
 
     let mut output_path = use_signal(|| default_path.to_string_lossy().to_string());
@@ -60,8 +49,6 @@ fn FilePickerView(video: VideoItem, mut view: Signal<View>) -> Element {
 
     rsx! {
         div { class: "view",
-
-            // ── Header ──────────────────────────────────────────────────────
             div { class: "header",
                 div { class: "header-icon header-icon--blue", "↓" }
                 div { class: "header-text",
@@ -72,13 +59,11 @@ fn FilePickerView(video: VideoItem, mut view: Signal<View>) -> Element {
 
             div { class: "divider divider--top" }
 
-            // ── Source URL ───────────────────────────────────────────────────
             div { class: "field",
                 div { class: "field-label", "Source URL" }
                 div { class: "field-value", "{video.url}" }
             }
 
-            // ── Save location ────────────────────────────────────────────────
             div { class: "field",
                 div { class: "field-label", "Save to" }
                 div { class: "path-row",
@@ -114,7 +99,6 @@ fn FilePickerView(video: VideoItem, mut view: Signal<View>) -> Element {
                 }
             }
 
-            // ── Error ────────────────────────────────────────────────────────
             if !error_msg().is_empty() {
                 div { class: "error-banner", "{error_msg}" }
             }
@@ -122,7 +106,6 @@ fn FilePickerView(video: VideoItem, mut view: Signal<View>) -> Element {
             div { class: "spacer" }
             div { class: "divider divider--bottom" }
 
-            // ── Buttons ──────────────────────────────────────────────────────
             div { class: "btn-row",
                 button {
                     class: "btn btn--cancel",
@@ -175,10 +158,6 @@ fn FilePickerView(video: VideoItem, mut view: Signal<View>) -> Element {
     }
 }
 
-// ---------------------------------------------------------------------------
-// View 2 — Progress
-// ---------------------------------------------------------------------------
-
 #[component]
 fn ProgressView(download_id: String, title: String) -> Element {
     let mut snapshot = use_signal(|| ProgressSnapshot {
@@ -223,8 +202,6 @@ fn ProgressView(download_id: String, title: String) -> Element {
 
     rsx! {
         div { class: "view",
-
-            // ── Header ──────────────────────────────────────────────────────
             div { class: "header",
                 div {
                     class: if is_done { "header-icon header-icon--green" } else { "header-icon header-icon--blue" },
@@ -240,7 +217,6 @@ fn ProgressView(download_id: String, title: String) -> Element {
 
             div { class: "divider divider--top" }
 
-            // ── Percentage + bar ─────────────────────────────────────────────
             div { style: "flex-shrink: 0;",
                 div { class: "pct-row",
                     span { class: "pct-hero", "{pct:.1}%" }
@@ -260,7 +236,6 @@ fn ProgressView(download_id: String, title: String) -> Element {
                 }
             }
 
-            // ── Stat cards ───────────────────────────────────────────────────
             div { class: "stats-row",
                 div { class: "stat-card",
                     div { class: "stat-label", "Speed" }
@@ -274,7 +249,6 @@ fn ProgressView(download_id: String, title: String) -> Element {
                 }
             }
 
-            // ── Error ────────────────────────────────────────────────────────
             if !error_msg().is_empty() {
                 div { class: "error-banner", style: "margin-top: 14px;", "{error_msg}" }
             }
@@ -282,7 +256,6 @@ fn ProgressView(download_id: String, title: String) -> Element {
             div { class: "spacer" }
             div { class: "divider divider--bottom" }
 
-            // ── Button ───────────────────────────────────────────────────────
             div { class: "btn-row",
                 if is_done {
                     button {
@@ -310,10 +283,6 @@ fn ProgressView(download_id: String, title: String) -> Element {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Utilities
-// ---------------------------------------------------------------------------
 
 fn derive_filename(title: &str, url: &str, mime: &str) -> String {
     let base = if !title.is_empty() {

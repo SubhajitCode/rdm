@@ -55,15 +55,14 @@ pub async fn probe_url(
     let builder = client.get(&header_data.url);
     let mut builder = apply_headers(builder, header_data, auth_header.as_deref());
 
-    // Request only 1 byte to test resumability and get total size
     builder = builder.header("Range", "bytes=0-0");
 
     let response = builder.send().await?;
 
     let resumable = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
 
-    // Parse file size from Content-Range header (e.g. "bytes 0-0/1234567")
-    // This is more reliable than Content-Length when using Range: bytes=0-0
+    // Content-Range (e.g. "bytes 0-0/1234567") is more reliable than Content-Length
+    // when using Range: bytes=0-0.
     let resource_size = response
         .headers()
         .get("content-range")
@@ -93,7 +92,6 @@ pub async fn probe_url(
             .map(|s| s.to_string()),
     };
 
-    // Drop response — only 1 byte of body data, minimal waste
     drop(response);
 
     Ok(probe)
@@ -121,7 +119,6 @@ pub async fn download_segment(
 
     segment.state = SegmentState::Downloading;
 
-    // Pre-compute auth header once (avoids format! + base64 on every retry)
     let auth_header = precompute_auth(header_data);
 
     loop {
@@ -129,11 +126,9 @@ pub async fn download_segment(
             return Err(DownloadError::Cancelled);
         }
 
-        // Build request with shared helper
         let builder = client.get(&header_data.url);
         let mut builder = apply_headers(builder, header_data, auth_header.as_deref());
 
-        // Add Range header for resumable downloads
         if segment.length > 0 {
             let start = segment.offset + segment.downloaded;
             let end = segment.offset + segment.length - 1;
@@ -174,7 +169,6 @@ pub async fn download_segment(
                     );
                 }
 
-                // Open temp file with async I/O + 256 KB write buffer
                 let file_path = temp_dir.join(&segment.id);
                 let file = if segment.downloaded > 0 {
                     tokio::fs::OpenOptions::new()
@@ -189,8 +183,7 @@ pub async fn download_segment(
                 };
                 let mut writer = tokio::io::BufWriter::with_capacity(256 * 1024, file);
 
-                // How many bytes this segment still needs. For non-resumable
-                // downloads (length == -1) we accept everything the server sends.
+                // For non-resumable downloads (length == -1) accept everything the server sends.
                 let remaining = if segment.length > 0 {
                     (segment.length - segment.downloaded) as u64
                 } else {
@@ -198,7 +191,6 @@ pub async fn download_segment(
                 };
                 let mut bytes_written: u64 = 0;
 
-                // Stream the response body chunk by chunk
                 let mut stream = response.bytes_stream();
                 let mut stream_error = false;
 
@@ -224,7 +216,6 @@ pub async fn download_segment(
                             };
 
                             if to_write.is_empty() {
-                                // Already received all the bytes we need — stop early.
                                 log::debug!(
                                     "[download_segment] segment={}: received all {} expected bytes, stopping stream",
                                     segment.id, segment.length
@@ -241,7 +232,6 @@ pub async fn download_segment(
                             segment.downloaded += written_len as i64;
                             on_progress(written_len);
 
-                            // If we have exactly enough, stop reading.
                             if segment.length > 0 && bytes_written >= remaining {
                                 log::debug!(
                                     "[download_segment] segment={}: reached expected length {}, stopping stream",
@@ -251,7 +241,6 @@ pub async fn download_segment(
                             }
                         }
                         Err(_e) => {
-                            // Network error mid-stream — flush what we have, then retry
                             let _ = writer.flush().await;
                             stream_error = true;
                             break;
@@ -312,35 +301,27 @@ pub async fn download_segment(
 /// extended form (e.g. `filename*=UTF-8''My%20File.mp4`).  The RFC 5987
 /// form takes priority when both are present.
 pub fn extract_filename(disposition: &str) -> Option<String> {
-    // RFC 5987: filename*=charset'language'encoded-value (preferred)
     if let Some(name) = extract_filename_star(disposition) {
         return Some(name);
     }
-
-    // Plain filename="..." or filename=...
     extract_filename_plain(disposition)
 }
 
 /// Extract `filename*=UTF-8''...` (RFC 5987 extended notation).
 fn extract_filename_star(disposition: &str) -> Option<String> {
-    // Case-insensitive search for "filename*="
     let lower = disposition.to_lowercase();
     let key = "filename*=";
     let idx = lower.find(key)?;
     let rest = &disposition[idx + key.len()..];
-    // Strip optional surrounding whitespace / quotes
     let rest = rest.split(';').next().unwrap_or(rest).trim();
 
-    // Format: charset'language'encoded-value
-    // We only handle UTF-8 (the overwhelmingly common case).
+    // Format: charset'language'encoded-value — only UTF-8 is handled.
     let after_charset = if let Some(s) = rest.strip_prefix("UTF-8''").or_else(|| rest.strip_prefix("utf-8''")) {
         s
     } else {
-        // Unknown charset — fall through to plain filename=
         return None;
     };
 
-    // Percent-decode the value.
     Some(percent_decode(after_charset))
 }
 
@@ -348,12 +329,10 @@ fn extract_filename_star(disposition: &str) -> Option<String> {
 fn percent_decode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
-    // Collect bytes for multi-byte UTF-8 sequences
     let mut pending: Vec<u8> = Vec::new();
 
     while let Some(c) = chars.next() {
         if c == '%' {
-            // Try to read two hex digits
             let h1 = chars.next();
             let h2 = chars.next();
             if let (Some(h1), Some(h2)) = (h1, h2) {
@@ -363,7 +342,6 @@ fn percent_decode(s: &str) -> String {
                     continue;
                 }
             }
-            // Not valid hex — flush pending and emit literally
             flush_pending(&mut pending, &mut out);
             out.push('%');
             if let Some(h1) = h1 {
@@ -388,7 +366,6 @@ fn flush_pending(pending: &mut Vec<u8>, out: &mut String) {
     if let Ok(s) = std::str::from_utf8(pending) {
         out.push_str(s);
     } else {
-        // Replace invalid UTF-8 sequences with replacement character
         out.push('\u{FFFD}');
     }
     pending.clear();
@@ -401,7 +378,6 @@ fn extract_filename_plain(disposition: &str) -> Option<String> {
     let idx = lower.find(key)?;
     let start = idx + key.len();
     let slice = &disposition[start..];
-    // Terminate at `;` (next parameter boundary)
     let end = slice.find(';').unwrap_or(slice.len());
     let raw = slice[..end].trim().trim_matches('"');
     if raw.is_empty() {

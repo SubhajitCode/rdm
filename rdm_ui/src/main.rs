@@ -8,12 +8,9 @@ use dioxus::desktop::{Config, WindowBuilder};
 use dioxus::prelude::*;
 use std::sync::OnceLock;
 
-/// Set once before `launch()`, read by the root component.
 static VIDEO_ITEM: OnceLock<VideoItem> = OnceLock::new();
 
 fn main() {
-    // rdmd writes the VideoItem JSON to our stdin and closes the pipe.
-    // We read it all before launching the Dioxus event loop.
     let video = read_video_from_stdin().unwrap_or_else(|e| {
         eprintln!("[rdm_ui] {}", e);
         std::process::exit(1);
@@ -42,10 +39,6 @@ fn root() -> Element {
     }
 }
 
-/// Read the full stdin until EOF, then deserialize as a `VideoItem`.
-///
-/// rdmd writes the JSON and closes the pipe; we block here until EOF so we
-/// have the complete payload before the Dioxus event loop starts.
 fn read_video_from_stdin() -> Result<VideoItem, String> {
     use std::io::Read;
     let mut buf = String::new();

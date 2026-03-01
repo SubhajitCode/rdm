@@ -10,7 +10,6 @@ use super::snapshot::{SegmentSnapshot, ProgressSnapshot};
 /// EMA smoothing factor. 0.3 = responsive but stable.
 const EMA_ALPHA: f64 = 0.3;
 
-/// Internal per-segment tracking (purely data, no UI).
 struct SegmentProgress {
     segment_id: String,
     bytes_downloaded: u64,
@@ -69,19 +68,16 @@ impl ProgressNotifier {
                     for observer in &self.observers {
                         observer.on_error(&error).await;
                     }
-                    return; // stop processing after error
+                    return;
                 }
             }
         }
-        // Channel closed cleanly — all senders dropped, no error received
         self.finish().await;
     }
 
-    /// Process a single progress event and return the updated snapshot.
     fn handle_event(&mut self, ev: ProgressEvent) -> ProgressSnapshot {
         let now = Instant::now();
 
-        // Lazy init: track new segment_id on first sight
         if !self.segments.contains_key(&ev.segment_id) {
             let total = ev.total_bytes.unwrap_or(0);
             self.segment_order.push(ev.segment_id.clone());
@@ -97,19 +93,16 @@ impl ProgressNotifier {
             );
         }
 
-        // Update the segment state
         {
             let segment = self.segments.get_mut(&ev.segment_id).unwrap();
             segment.bytes_downloaded += ev.bytes_delta;
 
-            // Update total_bytes if we didn't know it before
             if segment.total_bytes == 0 {
                 if let Some(tb) = ev.total_bytes {
                     segment.total_bytes = tb;
                 }
             }
 
-            // Compute EMA speed
             let elapsed = now.duration_since(segment.last_update).as_secs_f64();
             if elapsed > 0.0 {
                 let instant_speed = ev.bytes_delta as f64 / elapsed;
@@ -121,7 +114,6 @@ impl ProgressNotifier {
         self.build_snapshot()
     }
 
-    /// Build a `ProgressSnapshot` from current aggregation state.
     fn build_snapshot(&self) -> ProgressSnapshot {
         let total_bytes: u64 = self.segments.values().map(|s| s.total_bytes).sum();
         let total_downloaded: u64 = self.segments.values().map(|s| s.bytes_downloaded).sum();
@@ -164,7 +156,6 @@ impl ProgressNotifier {
         }
     }
 
-    /// Finalize: build final snapshot with `done = true`, notify all observers.
     async fn finish(self) {
         let elapsed = self.start_time.elapsed();
         let total_downloaded: u64 = self.segments.values().map(|s| s.bytes_downloaded).sum();

@@ -12,10 +12,6 @@
 
 use std::path::PathBuf;
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
 /// Return a safe, collision-free [`PathBuf`] for saving a download.
 ///
 /// # Arguments
@@ -34,12 +30,6 @@ pub fn safe_output_path(suggested: &str, url: &str, content_type: Option<&str>) 
     unique_path(dir, &name)
 }
 
-// ---------------------------------------------------------------------------
-// Download directory
-// ---------------------------------------------------------------------------
-
-/// Returns the download directory, creating it if needed.
-/// Priority: `$RDM_DOWNLOAD_DIR` → `~/Downloads/rdm`.
 fn download_dir() -> PathBuf {
     let dir = if let Ok(env_dir) = std::env::var("RDM_DOWNLOAD_DIR") {
         PathBuf::from(env_dir)
@@ -62,10 +52,6 @@ fn download_dir() -> PathBuf {
     dir
 }
 
-// ---------------------------------------------------------------------------
-// Filename sanitisation
-// ---------------------------------------------------------------------------
-
 /// Characters that are always safe in a filename on macOS / Linux / Windows.
 /// Anything outside this set is replaced with `_`.
 /// Note: space is intentionally excluded — spaces are normalised to `_` so
@@ -84,47 +70,37 @@ fn is_safe_char(c: char) -> bool {
 /// If neither `suggested` nor `url` carry an extension, `content_type` is
 /// consulted to pick an appropriate one (e.g. `"video/mp4"` → `.mp4`).
 fn sanitise_filename(suggested: &str, url: &str, content_type: Option<&str>) -> String {
-    // Try the suggestion first; fall back to last URL path segment.
     let raw = if !suggested.trim().is_empty() {
         suggested.to_string()
     } else {
         filename_from_url(url)
     };
 
-    // Strip any leading path components (prevents traversal).
     let raw = PathBuf::from(&raw)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or(raw.clone());
 
-    // Split stem and extension before sanitising to preserve extension as-is.
     let (stem, ext) = split_stem_ext(&raw);
 
-    // Sanitise stem: replace unsafe chars (including space) with `_`.
     let stem: String = stem
         .chars()
         .map(|c| if is_safe_char(c) { c } else { '_' })
         .collect();
 
-    // Collapse consecutive underscores.
     let stem = collapse_runs(&stem);
     let stem = stem.trim_matches(|c| c == '_' || c == '.').to_string();
 
-    // Guard against empty or dots-only stems.
     let stem = if stem.is_empty() || stem.chars().all(|c| c == '.') {
         "download".to_string()
     } else {
         stem
     };
 
-    // Limit stem length.
     let stem = truncate_to_bytes(&stem, 180);
 
-    // Sanitise extension (alphanumeric only, max 10 chars).
     let ext = sanitise_ext(&ext);
 
-    // If no extension was found in the filename, try to derive one from the
-    // MIME type or from the URL path segment.
     let ext = if ext.is_empty() {
         ext_from_content_type(content_type)
             .or_else(|| ext_from_url(url))
@@ -140,8 +116,6 @@ fn sanitise_filename(suggested: &str, url: &str, content_type: Option<&str>) -> 
     }
 }
 
-/// Split a filename into `(stem, extension)`.
-/// Extension is the part after the last `.`; empty if no dot or leading dot only.
 fn split_stem_ext(name: &str) -> (String, String) {
     let p = PathBuf::from(name);
     let ext = p
@@ -155,7 +129,6 @@ fn split_stem_ext(name: &str) -> (String, String) {
     (stem, ext)
 }
 
-/// Sanitise an extension: lowercase, alphanumeric only, max 10 chars.
 fn sanitise_ext(ext: &str) -> String {
     let clean: String = ext
         .chars()
@@ -166,8 +139,6 @@ fn sanitise_ext(ext: &str) -> String {
     clean
 }
 
-/// Map a MIME type to a common file extension, e.g. `"video/mp4"` → `"mp4"`.
-/// Returns `None` for unknown or missing types.
 fn ext_from_content_type(content_type: Option<&str>) -> Option<String> {
     let mime = content_type?
         .split(';') // strip parameters like "; charset=utf-8"
@@ -228,8 +199,6 @@ fn ext_from_content_type(content_type: Option<&str>) -> Option<String> {
     Some(ext.to_string())
 }
 
-/// Extract the extension from the URL path (strip query / fragment first).
-/// Returns `None` when the URL path has no recognisable extension.
 fn ext_from_url(url: &str) -> Option<String> {
     let url = url.split('?').next().unwrap_or(url);
     let url = url.split('#').next().unwrap_or(url);
@@ -245,14 +214,12 @@ fn ext_from_url(url: &str) -> Option<String> {
     }
 }
 
-/// Collapse consecutive `_` characters to a single `_`.
-/// (Space is no longer allowed in stems, so only `_` runs need collapsing.)
 fn collapse_runs(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut last: Option<char> = None;
     for c in s.chars() {
         if c == '_' && last == Some('_') {
-            continue; // skip duplicate underscore
+            continue;
         }
         out.push(c);
         last = Some(c);
@@ -260,7 +227,6 @@ fn collapse_runs(s: &str) -> String {
     out
 }
 
-/// Truncate `s` to at most `max_bytes` UTF-8 bytes, respecting char boundaries.
 fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_string();
@@ -272,9 +238,7 @@ fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
     s[..end].to_string()
 }
 
-/// Extract the last non-empty path segment from a URL (strip query / fragment).
 fn filename_from_url(url: &str) -> String {
-    // Strip query and fragment.
     let url = url.split('?').next().unwrap_or(url);
     let url = url.split('#').next().unwrap_or(url);
     url.rsplit('/')
@@ -283,11 +247,6 @@ fn filename_from_url(url: &str) -> String {
         .to_string()
 }
 
-// ---------------------------------------------------------------------------
-// Collision avoidance
-// ---------------------------------------------------------------------------
-
-/// Return a path that does not exist yet, appending `_2`, `_3`, … as needed.
 fn unique_path(dir: PathBuf, name: &str) -> PathBuf {
     let candidate = dir.join(name);
     if !candidate.exists() {
@@ -320,10 +279,6 @@ fn uuid_suffix() -> String {
     format!("{:016x}", h.finish())
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,7 +293,6 @@ mod tests {
     #[test]
     fn traversal_stripped() {
         let name = sanitise_filename("../../etc/passwd", "http://example.com", None);
-        // Path traversal segments stripped — only last component kept.
         assert!(!name.contains(".."));
         assert!(!name.contains('/'));
     }
@@ -370,8 +324,6 @@ mod tests {
         assert_eq!(s, "hello_world");
     }
 
-    // ----- spaces → underscores -----
-
     #[test]
     fn spaces_replaced_with_underscores() {
         let name = sanitise_filename("My Video HD.mp4", "http://x.com", None);
@@ -389,8 +341,6 @@ mod tests {
         assert!(!name.starts_with('_'));
         assert!(!name.contains(' '));
     }
-
-    // ----- extension from MIME type -----
 
     #[test]
     fn ext_added_from_content_type_when_missing() {
@@ -412,7 +362,6 @@ mod tests {
 
     #[test]
     fn ext_from_content_type_takes_precedence_over_url() {
-        // The suggested name has no ext; content_type is specific; URL has a different ext.
         let name = sanitise_filename(
             "Video Title",
             "https://cdn.example.com/file.bin",
@@ -423,7 +372,6 @@ mod tests {
 
     #[test]
     fn ext_from_content_type_with_charset_param() {
-        // MIME type with extra params: "; charset=utf-8" should still be parsed.
         let name = sanitise_filename(
             "doc",
             "http://x.com",
@@ -431,8 +379,6 @@ mod tests {
         );
         assert_eq!(name, "doc.pdf");
     }
-
-    // ----- ext_from_content_type helper -----
 
     #[test]
     fn mime_video_mp4_maps_to_mp4() {
