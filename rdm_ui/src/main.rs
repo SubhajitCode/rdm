@@ -1,5 +1,6 @@
 mod api;
 mod app;
+mod styles;
 
 use api::VideoItem;
 use app::App;
@@ -22,12 +23,12 @@ fn main() {
 
     VIDEO_ITEM.set(video).expect("VIDEO_ITEM already set");
 
-    dioxus::LaunchBuilder::new()
+    LaunchBuilder::new()
         .with_cfg(
             Config::new().with_window(
                 WindowBuilder::new()
                     .with_title(title)
-                    .with_inner_size(dioxus::desktop::tao::dpi::LogicalSize::new(560.0_f64, 380.0_f64))
+                    .with_inner_size(dioxus::desktop::tao::dpi::LogicalSize::new(480.0_f64, 310.0_f64))
                     .with_resizable(false),
             ),
         )
@@ -41,7 +42,7 @@ fn root() -> Element {
     }
 }
 
-/// Read the full stdin until EOF, then deserialise as a `VideoItem`.
+/// Read the full stdin until EOF, then deserialize as a `VideoItem`.
 ///
 /// rdmd writes the JSON and closes the pipe; we block here until EOF so we
 /// have the complete payload before the Dioxus event loop starts.

@@ -245,7 +245,7 @@ async fn download_handler(
         url:              req.url,
         cookie:           req.cookie,
         request_headers:  req.request_headers,
-        response_headers: std::collections::HashMap::new(),
+        response_headers: HashMap::new(),
         method:           None,
         user_agent:       req.user_agent,
         tab_url:          None,
@@ -392,7 +392,7 @@ fn find_ui_binary() -> PathBuf {
 /// The task runs in the background; the server response is not blocked.
 /// The `state` is used to register and update the download's status.
 fn spawn_download_to_path(item: VideoListItem, output_path_str: String, state: Arc<AppState>) {
-    let output_path = std::path::PathBuf::from(&output_path_str);
+    let output_path = PathBuf::from(&output_path_str);
     log::info!("[download] output_path={:?}", output_path);
 
     // Convert request headers: HashMap<String, serde_json::Value (array)>
