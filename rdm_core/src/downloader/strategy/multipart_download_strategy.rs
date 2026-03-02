@@ -71,7 +71,7 @@ impl MultipartDownloadStrategy {
             connections: MAX_CONNECTIONS,
         }
     }
-    pub fn from_state(state: DownloaderState) -> Self {
+    pub fn from_state(state: DownloaderState,connections:usize) -> Self {
         let client = state.get_client().clone();
         Self {
             state: Arc::new(StdRwLock::new(DownloaderState {
@@ -81,7 +81,7 @@ impl MultipartDownloadStrategy {
             client: Arc:: new(client),
             cancel_token: CancellationToken::new(),
             progress_tx: StdMutex::new(None),
-            connections: MAX_CONNECTIONS,
+            connections,
         }
     }
 

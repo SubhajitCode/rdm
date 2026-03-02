@@ -12,15 +12,17 @@ use crate::types::types::{DownloadError, DownloaderState};
 pub struct HttpDownloader {
     download_strategy: Option<Arc<dyn DownloadStrategy>>,
     notifier: ProgressNotifier,
-    downloader_state: DownloaderState
+    downloader_state: DownloaderState,
+    connections:usize
 }
 
 impl HttpDownloader {
-    pub  fn new(downloader_state: DownloaderState) -> Self {
+    pub  fn new(downloader_state: DownloaderState,connections:usize) -> Self {
         Self {
             notifier: ProgressNotifier::new(),
             download_strategy: None,
-            downloader_state
+            downloader_state,
+            connections
         }
     }
 
@@ -63,15 +65,15 @@ impl HttpDownloader {
     }
     async  fn create_download_strategy(&self) -> Arc<dyn DownloadStrategy> {
         let download_type= detect_download_strategy(self.downloader_state.clone()).await;
-        match download_type { 
+        match download_type {
             crate::downloader::util::DownloadStrategyType::OnePart => {
                 //TODO create OnePartDownloadStrategy
                 todo!("OnePart download strategy")
             },
             crate::downloader::util::DownloadStrategyType::MultiPart => {
                 //TODO create MultiPartDownloadStrategy
-                Arc::new( MultipartDownloadStrategy::from_state(self.downloader_state.clone()))
-                
+                Arc::new( MultipartDownloadStrategy::from_state(self.downloader_state.clone(),self.connections) )
+
             },
             crate::downloader::util::DownloadStrategyType::ERR(err) => {
                 println!("Error detecting download strategy: {}", err);

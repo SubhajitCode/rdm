@@ -125,7 +125,7 @@ pub struct VideoListItem {
 }
 
 impl VideoListItem {
-    pub fn get_downloader_state(&self,output_path:String) -> DownloaderState {
+    pub fn get_downloader_state(&self, output_path:String) -> DownloaderState {
 
         DownloaderState {
             id: self.id.clone(),

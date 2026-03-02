@@ -363,7 +363,7 @@ fn spawn_download_to_path(item: VideoListItem, output_path_str: String, state: A
     // };
     //
     // let strategy = builder.build();
-    let mut downloader = HttpDownloader::new(item.get_downloader_state(output_path_str));
+    let mut downloader = HttpDownloader::new(item.get_downloader_state(output_path_str),state.connections);
 
     let (sse_observer, progress_watch_rx) = SseProgressObserver::new();
     downloader.add_observer(Box::new(sse_observer));

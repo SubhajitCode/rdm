@@ -153,6 +153,27 @@ pub async fn download_segment(
                     segment.id, status, content_length, segment.length
                 );
 
+                // Non-2xx responses (e.g. 503 Service Unavailable, 429 Too Many Requests)
+                // are valid HTTP but indicate a server-side error. reqwest::send() succeeds
+                // at the transport level, so these would otherwise fall through and write the
+                // error response body (e.g. an HTML error page) into the segment temp file.
+                // Treat them as retryable failures instead.
+                if !status.is_success() {
+                    log::warn!(
+                        "[download_segment] segment={}: received non-success status={}, retrying (attempt {}/{})",
+                        segment.id, status, retries + 1, MAX_RETRIES
+                    );
+                    retries += 1;
+                    if retries >= MAX_RETRIES {
+                        segment.state = SegmentState::Failed;
+                        return Err(DownloadError::MaxRetryExceeded);
+                    }
+                    // Exponential backoff: 200ms, 400ms, 800ms
+                    let delay_ms = 100u64 * (1u64 << retries.min(5));
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    continue;
+                }
+
                 // BUG DETECTION: If we sent a Range request but got 200 (not 206),
                 // the server ignored our Range header and is sending the ENTIRE file.
                 // Each of the N segments will download the full file, resulting in Nx file size.
@@ -268,14 +289,26 @@ pub async fn download_segment(
                     if segment.length > 0 { segment.downloaded == segment.length } else { true }
                 );
 
-                // BUG DETECTION: downloaded more bytes than the segment should contain
+                // Size mismatch: the server delivered fewer (or more) bytes than the
+                // segment required. Treat this as a retryable failure rather than
+                // silently assembling a corrupt output file.
                 if segment.length > 0 && segment.downloaded != segment.length {
-                    log::error!(
-                        "[download_segment] BUG: segment={}: size mismatch! downloaded={} but expected={}. \
-                         The server likely ignored the Range header and sent the full file. \
-                         This will cause the assembled output to be larger than the original file.",
-                        segment.id, segment.downloaded, segment.length
+                    log::warn!(
+                        "[download_segment] segment={}: size mismatch! downloaded={} but expected={}. \
+                         Treating as a transient error and retrying (attempt {}/{}).",
+                        segment.id, segment.downloaded, segment.length, retries + 1, MAX_RETRIES
                     );
+                    // Reset downloaded counter so the next attempt re-fetches the full segment.
+                    segment.downloaded = 0;
+                    retries += 1;
+                    if retries >= MAX_RETRIES {
+                        segment.state = SegmentState::Failed;
+                        return Err(DownloadError::MaxRetryExceeded);
+                    }
+                    // Exponential backoff: 200ms, 400ms, 800ms
+                    let delay_ms = 100u64 * (1u64 << retries.min(5));
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    continue;
                 }
 
                 segment.state = SegmentState::Finished;
