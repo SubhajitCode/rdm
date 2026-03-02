@@ -1,12 +1,16 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use wiremock::matchers::{header_regex, method};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use rdm_core::downloader::http_downloader::HttpDownloader;
 use rdm_core::downloader::strategy::download_strategy::DownloadStrategy;
 use rdm_core::downloader::strategy::multipart_download_strategy::MultipartDownloadStrategy;
+use rdm_core::progress::observer::ProgressObserver;
+use rdm_core::progress::snapshot::ProgressSnapshot;
+use rdm_core::types::types::DownloaderState;
 
 /// Generates deterministic test data.
 fn generate_test_data(size: usize) -> Vec<u8> {
@@ -81,12 +85,8 @@ async fn test_http_downloader_end_to_end_with_range_server() {
 
     let output_filename = format!("test_e2e_output_{}.bin", uuid::Uuid::new_v4());
 
-    let strategy = Arc::new(MultipartDownloadStrategy::new(
-        server.uri(),
-        PathBuf::from(&output_filename),
-    ));
-
-    let mut downloader = HttpDownloader::new(strategy.clone());
+    let state = DownloaderState::new(server.uri(), PathBuf::from(&output_filename));
+    let mut downloader = HttpDownloader::new(state, 8);
     downloader.download().await.unwrap();
 
     let output = std::fs::read(&output_filename).unwrap();
@@ -114,12 +114,8 @@ async fn test_http_downloader_non_resumable() {
         .await;
 
     let output_filename = "non_resumable_test.bin";
-    let strategy = Arc::new(MultipartDownloadStrategy::new(
-        server.uri(),
-        PathBuf::from(output_filename),
-    ));
-
-    let mut downloader = HttpDownloader::new(strategy);
+    let state = DownloaderState::new(server.uri(), PathBuf::from(output_filename));
+    let mut downloader = HttpDownloader::new(state, 8);
     downloader.download().await.unwrap();
 
     let output = std::fs::read(output_filename).unwrap();
@@ -160,6 +156,7 @@ async fn test_http_downloader_stop_during_download() {
         .mount(&server)
         .await;
 
+    // For stop test we test the strategy directly (needs preprocess + concurrent download + stop)
     let strategy = Arc::new(MultipartDownloadStrategy::new(
         server.uri(),
         PathBuf::from("stop_test.bin"),
@@ -191,12 +188,11 @@ async fn test_http_downloader_stop_during_download() {
 
 #[tokio::test]
 async fn test_http_downloader_invalid_url_fails() {
-    let strategy = Arc::new(MultipartDownloadStrategy::new(
+    let state = DownloaderState::new(
         "http://127.0.0.1:1/nonexistent".to_string(),
         PathBuf::from("fail_test.bin"),
-    ));
-
-    let mut downloader = HttpDownloader::new(strategy);
+    );
+    let mut downloader = HttpDownloader::new(state, 8);
     let result = downloader.download().await;
     assert!(result.is_err(), "download to unreachable host should fail");
 }
@@ -204,11 +200,6 @@ async fn test_http_downloader_invalid_url_fails() {
 // ---------------------------------------------------------------
 // Observer used in the progress test to collect events
 // ---------------------------------------------------------------
-
-use std::sync::Mutex;
-use async_trait::async_trait;
-use rdm_core::progress::observer::ProgressObserver;
-use rdm_core::progress::snapshot::ProgressSnapshot;
 
 struct CollectingObserver {
     total_bytes: Mutex<u64>,
@@ -251,15 +242,11 @@ async fn test_http_downloader_progress_events_received() {
         .mount(&server)
         .await;
 
-    let strategy = Arc::new(MultipartDownloadStrategy::new(
-        server.uri(),
-        PathBuf::from("progress_test.bin"),
-    ));
-
+    let state = DownloaderState::new(server.uri(), PathBuf::from("progress_test.bin"));
     let observer = Arc::new(CollectingObserver::new());
     let observer_clone = Arc::clone(&observer);
 
-    let mut downloader = HttpDownloader::new(strategy);
+    let mut downloader = HttpDownloader::new(state, 8);
     downloader.add_observer(Box::new(CollectingObserverHandle(observer_clone)));
     downloader.download().await.unwrap();
 

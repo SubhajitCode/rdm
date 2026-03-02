@@ -1,7 +1,10 @@
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use reqwest::Client;
+use std::path::PathBuf;
+
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, COOKIE};
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SegmentState {
@@ -116,7 +119,6 @@ pub struct ProgressEvent {
     pub total_bytes: Option<u64>,
 }
 
-
 pub fn hashmap_vec_to_header_map(headers: &HashMap<String, Vec<String>>) -> HeaderMap {
     let mut map = HeaderMap::new();
     for (k, vals) in headers {
@@ -131,7 +133,7 @@ pub fn hashmap_vec_to_header_map(headers: &HashMap<String, Vec<String>>) -> Head
     map
 }
 
-impl ProxyInfo{
+impl ProxyInfo {
     pub fn to_reqwest_proxy(&self) -> reqwest::Proxy {
         let proxy_type = match self.port {
             80 => "http",
@@ -142,18 +144,39 @@ impl ProxyInfo{
         //TODO handle proxy authentication later
         reqwest::Proxy::all(&proxy_url).unwrap()
     }
-
 }
 
 impl DownloaderState {
-    pub fn get_client(&self) -> Client {
+    /// Convenience constructor. Generates a UUID id and a temp dir automatically.
+    pub fn new(url: String, output_path: PathBuf) -> Self {
+        let id = Uuid::new_v4().to_string();
+        let temp_dir = std::env::temp_dir().join(&id).to_string_lossy().to_string();
+        Self {
+            id,
+            url,
+            output_path: Some(output_path.to_string_lossy().to_string()),
+            temp_dir,
+            file_size: -1,
+            headers: HashMap::new(),
+            cookies: None,
+            authentication: None,
+            proxy: None,
+            convert_to_mp3: false,
+            last_modified: None,
+            resumable: false,
+            attachment_name: None,
+            content_type: None,
+        }
+    }
+
+    pub fn create_client(&self) -> Client {
         let mut builder = Client::builder();
         if let Some(proxy_info) = &self.proxy {
             let proxy = proxy_info.to_reqwest_proxy();
             builder = builder.proxy(proxy);
         }
         let mut default_headers = hashmap_vec_to_header_map(&self.headers);
-        if let Some (_auth)= &self.authentication {
+        if let Some(_auth) = &self.authentication {
             let uname = _auth.username.clone();
             let pwd = _auth.password.clone();
             let auth_header = format!("{}:{}", uname, pwd);

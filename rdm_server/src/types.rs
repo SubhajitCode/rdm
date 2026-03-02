@@ -125,24 +125,21 @@ pub struct VideoListItem {
 }
 
 impl VideoListItem {
-    pub fn get_downloader_state(&self, output_path:String) -> DownloaderState {
-
-        DownloaderState {
-            id: self.id.clone(),
-            url: self.url.clone(),
-            output_path: Some(output_path),
-            temp_dir: std::env::temp_dir().join(&self.id).to_string_lossy().to_string(),
-            file_size: 0,
-            headers: json_headers_to_vec(&self.request_headers),
-            cookies: Some(self.cookie.clone()),
-            authentication: None,
-            proxy: None,
-            convert_to_mp3: false,
-            last_modified: None,
-            resumable: false,
-            attachment_name: None,
-            content_type: None,
+    pub fn get_downloader_state(&self, output_path: String) -> DownloaderState {
+        let mut state =
+            DownloaderState::new(self.url.clone(), std::path::PathBuf::from(&output_path));
+        // Override the auto-generated id with the item's stable id so downloads
+        // can be looked up by the same id that the video tracker uses.
+        state.id = self.id.clone();
+        state.temp_dir = std::env::temp_dir()
+            .join(&self.id)
+            .to_string_lossy()
+            .to_string();
+        state.headers = json_headers_to_vec(&self.request_headers);
+        if !self.cookie.is_empty() {
+            state.cookies = Some(self.cookie.clone());
         }
+        state
     }
 }
 fn json_headers_to_vec(
@@ -150,10 +147,7 @@ fn json_headers_to_vec(
 ) -> HashMap<String, Vec<String>> {
     /// Headers that must be stripped before forwarding to the upstream server.
     fn is_blocked(key: &str) -> bool {
-        matches!(
-            key.to_lowercase().as_str(),
-            | "host"
-            | "connection"
+        matches!(key.to_lowercase().as_str(), |"host"| "connection"
             | "keep-alive"
             | "transfer-encoding"
             | "te"
@@ -171,8 +165,7 @@ fn json_headers_to_vec(
             | "range"
             // Body-related — not relevant for rdm's GET replay
             | "content-length"
-            | "content-type"
-        )
+            | "content-type")
     }
 
     headers

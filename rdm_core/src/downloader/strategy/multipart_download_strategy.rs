@@ -10,7 +10,10 @@ use uuid::Uuid;
 
 use crate::downloader::segment_grabber::{download_segment, probe_url};
 use crate::downloader::strategy::download_strategy::DownloadStrategy;
-use crate::types::types::{AuthenticationInfo, DownloadError, DownloaderState, HeaderData, Segment, ProgressEvent, ProxyInfo, SegmentState};
+use crate::types::types::{
+    AuthenticationInfo, DownloadError, DownloaderState, HeaderData, ProgressEvent, ProbeResult,
+    ProxyInfo, Segment, SegmentState,
+};
 
 const MAX_CONNECTIONS: usize = 8;
 
@@ -26,72 +29,51 @@ pub struct MultipartDownloadStrategy {
     progress_tx: StdMutex<Option<mpsc::Sender<Result<ProgressEvent, String>>>>,
     connections: usize,
 }
-pub struct MultipartDownloadStrategyBuilder {
-    strategy: MultipartDownloadStrategy,
-}
+
+// ---------------------------------------------------------------------------
+// Constructors
+// ---------------------------------------------------------------------------
 
 impl MultipartDownloadStrategy {
-
-    pub fn new(url: String, output_path: PathBuf) -> Self {
-        let id = Uuid::new_v4().to_string();
-        let temp_dir = std::env::temp_dir().join(&id);
-        let output_path_str = output_path.to_string_lossy().to_string();
-
+    /// Internal constructor — wraps an already-built `DownloaderState`.
+    pub fn from_state(state: DownloaderState, connections: usize) -> Self {
+        let client = state.create_client();
         Self {
-            state: Arc::new(StdRwLock::new(DownloaderState {
-                id,
-                url,
-                output_path: Some(output_path_str),
-                temp_dir: temp_dir.to_string_lossy().to_string(),
-                file_size: -1,
-                headers: HashMap::new(),
-                cookies: None,
-                authentication: None,
-                proxy: None,
-                convert_to_mp3: false,
-                last_modified: None,
-                resumable: false,
-                attachment_name: None,
-                content_type: None,
-            })),
+            state: Arc::new(StdRwLock::new(state)),
             segments: Arc::new(RwLock::new(HashMap::new())),
-            client: Arc::new(
-                Client::builder()
-                    .connect_timeout(std::time::Duration::from_secs(10))
-                    .pool_max_idle_per_host(MAX_CONNECTIONS)
-                    .tcp_nodelay(true)
-                    .no_gzip()
-                    .no_deflate()
-                    .no_brotli()
-                    .build()
-                    .expect("failed to build HTTP client"),
-            ),
-            cancel_token: CancellationToken::new(),
-            progress_tx: StdMutex::new(None),
-            connections: MAX_CONNECTIONS,
-        }
-    }
-    pub fn from_state(state: DownloaderState,connections:usize) -> Self {
-        let client = state.get_client().clone();
-        Self {
-            state: Arc::new(StdRwLock::new(DownloaderState {
-                ..state
-            })),
-            segments: Arc::new(RwLock::new(HashMap::new())),
-            client: Arc:: new(client),
+            client: Arc::new(client),
             cancel_token: CancellationToken::new(),
             progress_tx: StdMutex::new(None),
             connections,
         }
     }
 
-    pub fn builder(url:String,path:PathBuf) -> MultipartDownloadStrategyBuilder {
-        MultipartDownloadStrategyBuilder::new(url,path)
+    /// Convenience constructor for simple cases (no cookies/headers/proxy).
+    pub fn new(url: String, output_path: PathBuf) -> Self {
+        let state = DownloaderState::new(url, output_path);
+        Self::from_state(state, MAX_CONNECTIONS)
+    }
+
+    /// Entry point for the fluent builder API.
+    pub fn builder(url: String, path: PathBuf) -> MultipartDownloadStrategyBuilder {
+        MultipartDownloadStrategyBuilder::new(url, path)
+    }
+
+    /// Construct from a pre-fetched `ProbeResult` (avoids a second HTTP round-trip).
+    /// The probe's metadata (file_size, resumable, attachment_name, etc.) is applied
+    /// to the state before returning, so `preprocess()` becomes a no-op temp-dir creation.
+    pub fn from_probe(mut state: DownloaderState, probe: ProbeResult, connections: usize) -> Self {
+        state.file_size = probe.resource_size.map(|sz| sz as i64).unwrap_or(-1);
+        state.url = probe.final_uri;
+        state.last_modified = probe.last_modified;
+        state.resumable = probe.resumable;
+        state.attachment_name = probe.attachment_name;
+        state.content_type = probe.content_type;
+        Self::from_state(state, connections)
     }
 
     pub async fn temp_dir(&self) -> String {
-        let state = self.state.read().unwrap();
-        state.temp_dir.clone()
+        self.state.read().unwrap().temp_dir.clone()
     }
 
     pub fn state(&self) -> &Arc<StdRwLock<DownloaderState>> {
@@ -106,6 +88,113 @@ impl MultipartDownloadStrategy {
         &self.cancel_token
     }
 }
+
+// ---------------------------------------------------------------------------
+// Builder — plain-struct, no locking during construction
+// ---------------------------------------------------------------------------
+
+pub struct MultipartDownloadStrategyBuilder {
+    url: String,
+    output_path: PathBuf,
+    cookies: Option<String>,
+    headers: HashMap<String, Vec<String>>,
+    authentication: Option<AuthenticationInfo>,
+    proxy: Option<ProxyInfo>,
+    convert_to_mp3: bool,
+    last_modified: Option<String>,
+    attachment_name: Option<String>,
+    content_type: Option<String>,
+    connections: usize,
+}
+
+impl MultipartDownloadStrategyBuilder {
+    pub fn new(url: String, path: PathBuf) -> Self {
+        Self {
+            url,
+            output_path: path,
+            cookies: None,
+            headers: HashMap::new(),
+            authentication: None,
+            proxy: None,
+            convert_to_mp3: false,
+            last_modified: None,
+            attachment_name: None,
+            content_type: None,
+            connections: MAX_CONNECTIONS,
+        }
+    }
+
+    pub fn with_cookies(mut self, cookies: String) -> Self {
+        self.cookies = Some(cookies);
+        self
+    }
+
+    pub fn with_headers(mut self, headers: HashMap<String, Vec<String>>) -> Self {
+        self.headers = headers;
+        self
+    }
+
+    pub fn add_header<K, V>(mut self, key: K, value: V) -> Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.headers.insert(key.into(), vec![value.into()]);
+        self
+    }
+
+    pub fn with_authentication(mut self, auth: AuthenticationInfo) -> Self {
+        self.authentication = Some(auth);
+        self
+    }
+
+    pub fn with_proxy(mut self, proxy: ProxyInfo) -> Self {
+        self.proxy = Some(proxy);
+        self
+    }
+
+    pub fn with_convert_to_mp3(mut self, convert: bool) -> Self {
+        self.convert_to_mp3 = convert;
+        self
+    }
+
+    pub fn with_last_modified(mut self, last_modified: String) -> Self {
+        self.last_modified = Some(last_modified);
+        self
+    }
+
+    pub fn with_attachment_name(mut self, name: String) -> Self {
+        self.attachment_name = Some(name);
+        self
+    }
+
+    pub fn with_content_type(mut self, content_type: String) -> Self {
+        self.content_type = Some(content_type);
+        self
+    }
+
+    pub fn with_connection_size(mut self, connections: usize) -> Self {
+        self.connections = connections;
+        self
+    }
+
+    pub fn build(self) -> MultipartDownloadStrategy {
+        let mut state = DownloaderState::new(self.url, self.output_path);
+        state.cookies = self.cookies;
+        state.headers = self.headers;
+        state.authentication = self.authentication;
+        state.proxy = self.proxy;
+        state.convert_to_mp3 = self.convert_to_mp3;
+        state.last_modified = self.last_modified;
+        state.attachment_name = self.attachment_name;
+        state.content_type = self.content_type;
+        MultipartDownloadStrategy::from_state(state, self.connections)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Segment creation
+// ---------------------------------------------------------------------------
 
 /// Creates download segments using XDM-style dynamic halving.
 ///
@@ -172,7 +261,10 @@ fn create_segments(file_size: u64, max_connections: usize) -> Vec<Segment> {
     for (i, s) in segments.iter().enumerate() {
         log::debug!(
             "[create_segments]   segment[{}]: offset={}, length={}, end={}",
-            i, s.offset, s.length, s.offset + s.length - 1
+            i,
+            s.offset,
+            s.length,
+            s.offset + s.length - 1
         );
     }
 
@@ -192,6 +284,10 @@ fn build_header_data(
     })
 }
 
+// ---------------------------------------------------------------------------
+// DownloadStrategy impl
+// ---------------------------------------------------------------------------
+
 #[async_trait]
 impl DownloadStrategy for MultipartDownloadStrategy {
     fn set_progress_tx(&self, tx: mpsc::Sender<Result<ProgressEvent, String>>) {
@@ -203,23 +299,36 @@ impl DownloadStrategy for MultipartDownloadStrategy {
     }
 
     async fn preprocess(&self) -> Result<(), DownloadError> {
-        let header_data = build_header_data(&self.state)?;
-        let probe = probe_url(&self.client, &header_data).await?;
-
-        let resumable = probe.resumable;
-        let resource_size = probe.resource_size;
-
-        let temp_dir_path = {
-            let mut s = self.state.write().unwrap();
-            s.file_size = resource_size.map(|sz| sz as i64).unwrap_or(-1);
-            s.url = probe.final_uri;
-            s.last_modified = probe.last_modified;
-            s.resumable = resumable;
-            s.attachment_name = probe.attachment_name;
-            s.content_type = probe.content_type;
-            s.temp_dir.clone()
+        // If `from_probe` was used, state is already populated (file_size != -1 or resumable
+        // is set). We still need to probe when constructed directly via `new`/`from_state`
+        // (file_size == -1 and resumable == false means unprobed).
+        let already_probed = {
+            let s = self.state.read().unwrap();
+            s.file_size != -1 || s.resumable
         };
 
+        let (resumable, resource_size) = if already_probed {
+            let s = self.state.read().unwrap();
+            let size = if s.file_size > 0 { Some(s.file_size as u64) } else { None };
+            (s.resumable, size)
+        } else {
+            let header_data = build_header_data(&self.state)?;
+            let probe = probe_url(&self.client, &header_data).await?;
+            let resumable = probe.resumable;
+            let resource_size = probe.resource_size;
+            {
+                let mut s = self.state.write().unwrap();
+                s.file_size = resource_size.map(|sz| sz as i64).unwrap_or(-1);
+                s.url = probe.final_uri;
+                s.last_modified = probe.last_modified;
+                s.resumable = resumable;
+                s.attachment_name = probe.attachment_name;
+                s.content_type = probe.content_type;
+            }
+            (resumable, resource_size)
+        };
+
+        let temp_dir_path = self.state.read().unwrap().temp_dir.clone();
         tokio::fs::create_dir_all(&temp_dir_path)
             .await
             .map_err(DownloadError::Disk)?;
@@ -317,9 +426,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         }
 
         let results: Vec<_> = futures::future::join_all(
-            handles.into_iter().map(|(id, handle)| async move {
-                (id, handle.await)
-            }),
+            handles.into_iter().map(|(id, handle)| async move { (id, handle.await) }),
         )
         .await;
 
@@ -344,7 +451,8 @@ impl DownloadStrategy for MultipartDownloadStrategy {
                         s.state = SegmentState::Failed;
                     }
                     if first_error.is_none() {
-                        first_error = Some(DownloadError::SegmentFailed(join_err.to_string()));
+                        first_error =
+                            Some(DownloadError::SegmentFailed(join_err.to_string()));
                     }
                 }
             }
@@ -402,7 +510,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
                 .unwrap_or_else(|| "download.bin".to_string());
 
             // If the path has no extension, try to derive one from attachment_name or MIME type.
-            let output_file = ensure_extension(
+            let output_file = crate::downloader::util::ensure_extension(
                 base_output,
                 state.attachment_name.as_deref(),
                 state.content_type.as_deref(),
@@ -423,7 +531,8 @@ impl DownloadStrategy for MultipartDownloadStrategy {
                 let segment_file_size = std::fs::metadata(&segment_path)?.len();
                 log::info!(
                     "[postprocess] assembling segment={}: file_size={} bytes",
-                    segment_id, segment_file_size
+                    segment_id,
+                    segment_file_size
                 );
                 total_assembled += segment_file_size;
 
@@ -453,178 +562,5 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         .map_err(DownloadError::Disk)?;
 
         Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Extension helpers
-// ---------------------------------------------------------------------------
-
-/// If `path` already has a file extension, return it unchanged.
-/// Otherwise try to derive an extension from `attachment_name` (Content-
-/// Disposition) or `content_type` (MIME type) and append it.
-fn ensure_extension(
-    path: String,
-    attachment_name: Option<&str>,
-    content_type: Option<&str>,
-) -> String {
-    let pb = PathBuf::from(&path);
-    if pb.extension().is_some() {
-        return path;
-    }
-
-    let ext = attachment_name
-        .and_then(|n| PathBuf::from(n).extension().map(|e| e.to_string_lossy().into_owned()))
-        .or_else(|| ext_from_mime(content_type));
-
-    match ext {
-        Some(e) if !e.is_empty() => format!("{}.{}", path, e.to_lowercase()),
-        _ => path,
-    }
-}
-
-fn ext_from_mime(content_type: Option<&str>) -> Option<String> {
-    let mime = content_type?
-        .split(';')
-        .next()?
-        .trim()
-        .to_lowercase();
-
-    let ext = match mime.as_str() {
-        "video/mp4" | "video/x-m4v"                        => "mp4",
-        "video/x-matroska"                                  => "mkv",
-        "video/webm"                                        => "webm",
-        "video/x-msvideo"                                   => "avi",
-        "video/quicktime"                                   => "mov",
-        "video/x-ms-wmv"                                    => "wmv",
-        "video/3gpp"                                        => "3gp",
-        "video/x-flv"                                       => "flv",
-        "video/mpeg"                                        => "mpg",
-        "audio/mpeg"                                        => "mp3",
-        "audio/flac"                                        => "flac",
-        "audio/ogg"                                         => "ogg",
-        "audio/wav" | "audio/x-wav"                        => "wav",
-        "audio/aac"                                         => "aac",
-        "audio/x-m4a" | "audio/mp4"                        => "m4a",
-        "audio/opus"                                        => "opus",
-        "application/zip"                                   => "zip",
-        "application/x-tar"                                 => "tar",
-        "application/gzip" | "application/x-gzip"          => "gz",
-        "application/x-bzip2"                               => "bz2",
-        "application/x-7z-compressed"                       => "7z",
-        "application/x-rar-compressed" | "application/vnd.rar" => "rar",
-        "application/pdf"                                   => "pdf",
-        "application/x-msdownload"                          => "exe",
-        "application/x-ms-installer" | "application/x-msi" => "msi",
-        "application/vnd.debian.binary-package"             => "deb",
-        "application/x-rpm"                                 => "rpm",
-        "application/x-apple-diskimage"                     => "dmg",
-        _ => return None,
-    };
-    Some(ext.to_string())
-}
-
-impl MultipartDownloadStrategyBuilder {
-    pub fn new(url: String, path: PathBuf) -> Self {
-        Self {
-            strategy: MultipartDownloadStrategy::new(url, path),
-        }
-    }
-
-    pub fn from_state()-> Self {
-        Self {
-            strategy: MultipartDownloadStrategy::new("".to_string(), PathBuf::from("")),
-        }
-    }
-
-    pub fn with_cookies(self, cookies: String) -> Self {
-        {
-            let mut state = self.strategy.state.write().unwrap();
-            state.cookies = Some(cookies);
-        }
-        self
-    }
-
-    pub fn with_headers(self, headers: HashMap<String, Vec<String>>) -> Self {
-        {
-            let mut state = self.strategy.state.write().unwrap();
-            state.headers = headers;
-        }
-        self
-    }
-
-    pub fn add_header<K, V>(self, key: K, value: V) -> Self
-    where
-        K: Into<String>,
-        V: Into<String>,
-    {
-        {
-            let mut state = self.strategy.state.write().unwrap();
-            let key = key.into();
-            let value = value.into();
-            // insert() replaces any existing value for the key, preventing duplicates
-            // when the browser-captured request headers already contain the same key.
-            state.headers.insert(key, vec![value]);
-        }
-        self
-    }
-
-    pub fn with_authentication(self, auth: AuthenticationInfo) -> Self {
-        {
-            let mut state = self.strategy.state.write().unwrap();
-            state.authentication = Some(auth);
-        }
-        self
-    }
-
-    pub fn with_proxy(self, proxy: ProxyInfo) -> Self {
-        {
-            let mut state = self.strategy.state.write().unwrap();
-            state.proxy = Some(proxy);
-        }
-        self
-    }
-
-    pub fn with_convert_to_mp3(self, convert: bool) -> Self {
-        {
-            let mut state = self.strategy.state.write().unwrap();
-            state.convert_to_mp3 = convert;
-        }
-        self
-    }
-
-    pub fn with_last_modified(self, last_modified: String) -> Self {
-        {
-            let mut state = self.strategy.state.write().unwrap();
-            state.last_modified = Some(last_modified);
-        }
-        self
-    }
-
-    pub fn with_attachment_name(self, name: String) -> Self {
-        {
-            let mut state = self.strategy.state.write().unwrap();
-            state.attachment_name = Some(name);
-        }
-        self
-    }
-
-    pub fn with_content_type(self, content_type: String) -> Self {
-        {
-            let mut state = self.strategy.state.write().unwrap();
-            state.content_type = Some(content_type);
-        }
-        self
-    }
-    
-    pub fn with_connection_size(mut self, connections: usize) -> Self {
-        {
-            self.strategy.connections= connections;
-        }
-        self
-    }
-
-    pub fn build(self) -> MultipartDownloadStrategy {
-        self.strategy
     }
 }
