@@ -3,20 +3,24 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::downloader::strategy::download_strategy::DownloadStrategy;
+use crate::downloader::strategy::multipart_download_strategy::MultipartDownloadStrategy;
+use crate::downloader::util::detect_download_strategy;
 use crate::progress::notifier::ProgressNotifier;
 use crate::progress::observer::ProgressObserver;
-use crate::types::types::DownloadError;
+use crate::types::types::{DownloadError, DownloaderState};
 
 pub struct HttpDownloader {
-    download_strategy: Arc<dyn DownloadStrategy>,
+    download_strategy: Option<Arc<dyn DownloadStrategy>>,
     notifier: ProgressNotifier,
+    downloader_state: DownloaderState
 }
 
 impl HttpDownloader {
-    pub fn new(strategy: Arc<dyn DownloadStrategy>) -> Self {
+    pub  fn new(downloader_state: DownloaderState) -> Self {
         Self {
-            download_strategy: strategy,
             notifier: ProgressNotifier::new(),
+            download_strategy: None,
+            downloader_state
         }
     }
 
@@ -32,32 +36,50 @@ impl HttpDownloader {
     /// it after the download completes.  Callers only need `add_observer`.
     pub async fn download(&mut self) -> Result<(), DownloadError> {
         let (progress_tx, progress_rx) = mpsc::channel(256);
-        self.download_strategy.set_progress_tx(progress_tx);
-
+        // Inject the sender into the strategy so it can report progress during download.
+        self.download_strategy = Some(self.create_download_strategy().await);
+        self.download_strategy.as_ref().unwrap().set_progress_tx(progress_tx);
         let notifier = std::mem::replace(&mut self.notifier, ProgressNotifier::new());
         let notifier_handle = tokio::spawn(async move {
             notifier.run(progress_rx).await;
         });
 
         let result = async {
-            self.download_strategy.preprocess().await?;
-            self.download_strategy.download().await?;
-            self.download_strategy.postprocess().await
-        }
-        .await;
-
-        // Clear the sender so the channel closes and the notifier task exits cleanly.
-        self.download_strategy.clear_progress_tx();
+            self.download_strategy.as_ref().unwrap().preprocess().await?;
+            self.download_strategy.as_ref().unwrap().download().await?;
+            self.download_strategy.as_ref().unwrap().postprocess().await
+        }.await;
+        self.download_strategy.as_ref().unwrap().clear_progress_tx();
         let _ = notifier_handle.await;
-
         result
     }
 
     pub async fn stop(&self) -> Result<(), DownloadError> {
-        self.download_strategy.stop().await
+        self.download_strategy.as_ref().unwrap().stop().await
     }
 
     pub async fn pause(&self) -> Result<(), DownloadError> {
-        self.download_strategy.pause().await
+        self.download_strategy.as_ref().unwrap().pause().await
+    }
+    async  fn create_download_strategy(&self) -> Arc<dyn DownloadStrategy> {
+        let download_type= detect_download_strategy(self.downloader_state.clone()).await;
+        match download_type { 
+            crate::downloader::util::DownloadStrategyType::OnePart => {
+                //TODO create OnePartDownloadStrategy
+                todo!("OnePart download strategy")
+            },
+            crate::downloader::util::DownloadStrategyType::MultiPart => {
+                //TODO create MultiPartDownloadStrategy
+                Arc::new( MultipartDownloadStrategy::from_state(self.downloader_state.clone()))
+                
+            },
+            crate::downloader::util::DownloadStrategyType::ERR(err) => {
+                println!("Error detecting download strategy: {}", err);
+                //TODO handle error properly
+                panic!("Error detecting download strategy");
+            }
+        }
     }
 }
+
+

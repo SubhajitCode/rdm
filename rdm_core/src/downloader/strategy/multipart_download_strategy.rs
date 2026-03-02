@@ -31,6 +31,7 @@ pub struct MultipartDownloadStrategyBuilder {
 }
 
 impl MultipartDownloadStrategy {
+
     pub fn new(url: String, output_path: PathBuf) -> Self {
         let id = Uuid::new_v4().to_string();
         let temp_dir = std::env::temp_dir().join(&id);
@@ -65,6 +66,19 @@ impl MultipartDownloadStrategy {
                     .build()
                     .expect("failed to build HTTP client"),
             ),
+            cancel_token: CancellationToken::new(),
+            progress_tx: StdMutex::new(None),
+            connections: MAX_CONNECTIONS,
+        }
+    }
+    pub fn from_state(state: DownloaderState) -> Self {
+        let client = state.get_client().clone();
+        Self {
+            state: Arc::new(StdRwLock::new(DownloaderState {
+                ..state
+            })),
+            segments: Arc::new(RwLock::new(HashMap::new())),
+            client: Arc:: new(client),
             cancel_token: CancellationToken::new(),
             progress_tx: StdMutex::new(None),
             connections: MAX_CONNECTIONS,
@@ -514,6 +528,12 @@ impl MultipartDownloadStrategyBuilder {
     pub fn new(url: String, path: PathBuf) -> Self {
         Self {
             strategy: MultipartDownloadStrategy::new(url, path),
+        }
+    }
+
+    pub fn from_state()-> Self {
+        Self {
+            strategy: MultipartDownloadStrategy::new("".to_string(), PathBuf::from("")),
         }
     }
 

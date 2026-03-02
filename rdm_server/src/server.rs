@@ -15,7 +15,6 @@ use tokio::sync::{watch, Mutex as TokioMutex, RwLock};
 use tower_http::cors::{Any, CorsLayer};
 
 use rdm_core::downloader::http_downloader::HttpDownloader;
-use rdm_core::downloader::strategy::multipart_download_strategy::MultipartDownloadStrategy;
 use rdm_core::progress::snapshot::ProgressSnapshot;
 use crate::path_sanitizer::safe_output_path;
 use crate::sse_observer::SseProgressObserver;
@@ -339,32 +338,32 @@ fn spawn_download_to_path(item: VideoListItem, output_path_str: String, state: A
     let output_path = PathBuf::from(&output_path_str);
     log::info!("[download] output_path={:?}", output_path);
 
-    let req_headers = json_headers_to_vec(&item.request_headers);
+    // let req_headers = json_headers_to_vec(&item.request_headers);
 
-    let builder = MultipartDownloadStrategy::builder(item.url.clone(), output_path.clone())
-        .with_headers(req_headers)
-        .with_connection_size(state.connections);
-
-    let builder = if !item.cookie.is_empty() {
-        builder.with_cookies(item.cookie.clone())
-    } else {
-        builder
-    };
-
-    let builder = if let Some(ua) = &item.user_agent {
-        builder.add_header("User-Agent", ua.clone())
-    } else {
-        builder
-    };
-
-    let builder = if let Some(referer) = &item.referer {
-        builder.add_header("Referer", referer.clone())
-    } else {
-        builder
-    };
-
-    let strategy = builder.build();
-    let mut downloader = HttpDownloader::new(Arc::new(strategy));
+    // let builder = MultipartDownloadStrategy::builder(item.url.clone(), output_path.clone())
+    //     .with_headers(req_headers)
+    //     .with_connection_size(state.connections);
+    //
+    // let builder = if !item.cookie.is_empty() {
+    //     builder.with_cookies(item.cookie.clone())
+    // } else {
+    //     builder
+    // };
+    //
+    // let builder = if let Some(ua) = &item.user_agent {
+    //     builder.add_header("User-Agent", ua.clone())
+    // } else {
+    //     builder
+    // };
+    //
+    // let builder = if let Some(referer) = &item.referer {
+    //     builder.add_header("Referer", referer.clone())
+    // } else {
+    //     builder
+    // };
+    //
+    // let strategy = builder.build();
+    let mut downloader = HttpDownloader::new(item.get_downloader_state(output_path_str));
 
     let (sse_observer, progress_watch_rx) = SseProgressObserver::new();
     downloader.add_observer(Box::new(sse_observer));
@@ -431,60 +430,6 @@ fn spawn_download(item: VideoListItem, state: Arc<AppState>) {
     let output_path_str = output_path.to_string_lossy().to_string();
     spawn_download_to_path(item, output_path_str, state);
 }
-
-fn json_headers_to_vec(
-    headers: &HashMap<String, serde_json::Value>,
-) -> HashMap<String, Vec<String>> {
-    /// Headers that must be stripped before forwarding to the upstream server.
-    fn is_blocked(key: &str) -> bool {
-        matches!(
-            key.to_lowercase().as_str(),
-            | "host"
-            | "connection"
-            | "keep-alive"
-            | "transfer-encoding"
-            | "te"
-            | "trailer"
-            | "upgrade"
-            | "proxy-authorization"
-            | "proxy-authenticate"
-            | "proxy-connection"
-            // Managed separately by HeaderData.cookies / apply_headers
-            | "cookie"
-            // Managed by reqwest (auto-decompression disabled on the client)
-            | "accept-encoding"
-            // rdm sets its own Range header per segment; a browser-captured Range
-            // would create a duplicate and cause the server to return the wrong byte range.
-            | "range"
-            // Body-related — not relevant for rdm's GET replay
-            | "content-length"
-            | "content-type"
-        )
-    }
-
-    headers
-        .iter()
-        .filter_map(|(k, v)| {
-            if is_blocked(k) {
-                return None;
-            }
-            let values: Vec<String> = match v {
-                serde_json::Value::Array(arr) => arr
-                    .iter()
-                    .filter_map(|val| val.as_str().map(str::to_string))
-                    .collect(),
-                serde_json::Value::String(s) => vec![s.clone()],
-                _ => return None,
-            };
-            if values.is_empty() {
-                None
-            } else {
-                Some((k.clone(), values))
-            }
-        })
-        .collect()
-}
-
 async fn clear_handler(State(state): State<Arc<AppState>>) -> Json<SyncConfig> {
     {
         let mut tracker = state.video_tracker.write().await;

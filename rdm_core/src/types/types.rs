@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use reqwest::Client;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, COOKIE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SegmentState {
@@ -112,4 +114,59 @@ pub struct ProgressEvent {
     pub segment_id: String,
     pub bytes_delta: u64,
     pub total_bytes: Option<u64>,
+}
+
+
+pub fn hashmap_vec_to_header_map(headers: &HashMap<String, Vec<String>>) -> HeaderMap {
+    let mut map = HeaderMap::new();
+    for (k, vals) in headers {
+        if let Ok(name) = HeaderName::from_bytes(k.as_bytes()) {
+            for v in vals {
+                if let Ok(value) = HeaderValue::from_str(v) {
+                    map.append(name.clone(), value);
+                }
+            }
+        }
+    }
+    map
+}
+
+impl ProxyInfo{
+    pub fn to_reqwest_proxy(&self) -> reqwest::Proxy {
+        let proxy_type = match self.port {
+            80 => "http",
+            443 => "https",
+            _ => panic!("Unsupported proxy type: {}", self.port),
+        };
+        let proxy_url = format!("{}://{}:{}", proxy_type, self.host, self.port);
+        //TODO handle proxy authentication later
+        reqwest::Proxy::all(&proxy_url).unwrap()
+    }
+
+}
+
+impl DownloaderState {
+    pub fn get_client(&self) -> Client {
+        let mut builder = Client::builder();
+        if let Some(proxy_info) = &self.proxy {
+            let proxy = proxy_info.to_reqwest_proxy();
+            builder = builder.proxy(proxy);
+        }
+        let mut default_headers = hashmap_vec_to_header_map(&self.headers);
+        if let Some (_auth)= &self.authentication {
+            let uname = _auth.username.clone();
+            let pwd = _auth.password.clone();
+            let auth_header = format!("{}:{}", uname, pwd);
+            let auth_header_value = HeaderValue::from_str(&auth_header).unwrap();
+            default_headers.insert(AUTHORIZATION, auth_header_value);
+        }
+
+        if let Some(cookie) = &self.cookies {
+            //insert the cookie into the header map
+            let cookie_header_value = HeaderValue::from_str(cookie).unwrap();
+            default_headers.insert(COOKIE, cookie_header_value);
+        }
+        builder = builder.default_headers(default_headers);
+        builder.build().unwrap()
+    }
 }

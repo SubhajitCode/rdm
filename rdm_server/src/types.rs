@@ -1,6 +1,6 @@
+use rdm_core::types::types::DownloaderState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
 // ---------------------------------------------------------------------------
 // Inbound — browser extension payloads
 // ---------------------------------------------------------------------------
@@ -122,6 +122,80 @@ pub struct VideoListItem {
     #[serde(rename = "tabUrl")]
     pub tab_url: Option<String>,
     pub referer: Option<String>,
+}
+
+impl VideoListItem {
+    pub fn get_downloader_state(&self,output_path:String) -> DownloaderState {
+
+        DownloaderState {
+            id: self.id.clone(),
+            url: self.url.clone(),
+            output_path: Some(output_path),
+            temp_dir: std::env::temp_dir().join(&self.id).to_string_lossy().to_string(),
+            file_size: 0,
+            headers: json_headers_to_vec(&self.request_headers),
+            cookies: Some(self.cookie.clone()),
+            authentication: None,
+            proxy: None,
+            convert_to_mp3: false,
+            last_modified: None,
+            resumable: false,
+            attachment_name: None,
+            content_type: None,
+        }
+    }
+}
+fn json_headers_to_vec(
+    headers: &HashMap<String, serde_json::Value>,
+) -> HashMap<String, Vec<String>> {
+    /// Headers that must be stripped before forwarding to the upstream server.
+    fn is_blocked(key: &str) -> bool {
+        matches!(
+            key.to_lowercase().as_str(),
+            | "host"
+            | "connection"
+            | "keep-alive"
+            | "transfer-encoding"
+            | "te"
+            | "trailer"
+            | "upgrade"
+            | "proxy-authorization"
+            | "proxy-authenticate"
+            | "proxy-connection"
+            // Managed separately by HeaderData.cookies / apply_headers
+            | "cookie"
+            // Managed by reqwest (auto-decompression disabled on the client)
+            | "accept-encoding"
+            // rdm sets its own Range header per segment; a browser-captured Range
+            // would create a duplicate and cause the server to return the wrong byte range.
+            | "range"
+            // Body-related — not relevant for rdm's GET replay
+            | "content-length"
+            | "content-type"
+        )
+    }
+
+    headers
+        .iter()
+        .filter_map(|(k, v)| {
+            if is_blocked(k) {
+                return None;
+            }
+            let values: Vec<String> = match v {
+                serde_json::Value::Array(arr) => arr
+                    .iter()
+                    .filter_map(|val| val.as_str().map(str::to_string))
+                    .collect(),
+                serde_json::Value::String(s) => vec![s.clone()],
+                _ => return None,
+            };
+            if values.is_empty() {
+                None
+            } else {
+                Some((k.clone(), values))
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
