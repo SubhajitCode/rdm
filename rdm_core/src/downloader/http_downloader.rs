@@ -1,19 +1,18 @@
 use std::sync::Arc;
 
-use reqwest::Client;
 use tokio::sync::mpsc;
 
-use crate::downloader::segment_grabber::probe_url;
+use crate::downloader::segment_grabber::{get_max_connections, probe_url};
 use crate::downloader::strategy::download_strategy::DownloadStrategy;
 use crate::downloader::strategy::multipart_download_strategy::MultipartDownloadStrategy;
 use crate::downloader::strategy::onepart_download_strategy::OnePartDownloadStrategy;
 use crate::progress::notifier::ProgressNotifier;
 use crate::progress::observer::ProgressObserver;
-use crate::types::types::{DownloadError, DownloaderState, HeaderData};
+use crate::types::types::{DownloadError, DownloaderState};
 
 pub struct HttpDownloader {
     download_strategy: Option<Arc<dyn DownloadStrategy>>,
-    notifier: ProgressNotifier,
+    notifier: Arc<ProgressNotifier>,
     downloader_state: DownloaderState,
     connections: usize,
 }
@@ -21,7 +20,7 @@ pub struct HttpDownloader {
 impl HttpDownloader {
     pub fn new(downloader_state: DownloaderState, connections: usize) -> Self {
         Self {
-            notifier: ProgressNotifier::new(),
+            notifier: Arc::new(ProgressNotifier::new()),
             download_strategy: None,
             downloader_state,
             connections,
@@ -30,7 +29,8 @@ impl HttpDownloader {
 
     /// Register a progress observer. Must be called before `download()`.
     pub fn add_observer(&mut self, observer: Box<dyn ProgressObserver>) {
-        self.notifier.add_observer(observer);
+        // self.notifier.add_observer(observer);
+        Arc::get_mut(&mut self.notifier).unwrap().add_observer(observer);
     }
 
     /// Run the full download lifecycle (preprocess → download → postprocess).
@@ -45,20 +45,16 @@ impl HttpDownloader {
         let (progress_tx, progress_rx) = mpsc::channel(256);
         self.download_strategy.as_ref().unwrap().set_progress_tx(progress_tx);
 
-        let notifier = std::mem::replace(&mut self.notifier, ProgressNotifier::new());
-        let notifier_handle = tokio::spawn(async move {
-            notifier.run(progress_rx).await;
-        });
+        let notifier = Arc::get_mut(&mut self.notifier);
+        let progress_future= notifier.unwrap().run(progress_rx);
 
-        let result = async {
+        let result_future = async {
             self.download_strategy.as_ref().unwrap().preprocess().await?;
             self.download_strategy.as_ref().unwrap().download().await?;
             self.download_strategy.as_ref().unwrap().postprocess().await
-        }
-        .await;
-
+        };
+       let result = tokio::join!(progress_future, result_future).1;
         self.download_strategy.as_ref().unwrap().clear_progress_tx();
-        let _ = notifier_handle.await;
         result
     }
 
@@ -72,20 +68,11 @@ impl HttpDownloader {
 
     /// Probe the URL once, then select and construct the appropriate strategy.
     async fn select_strategy(&self) -> Result<Arc<dyn DownloadStrategy>, DownloadError> {
-        let client = Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(DownloadError::Network)?;
+        // Build the client from DownloaderState so proxy/auth/custom headers are
+        // applied consistently for both the probe and the real download.
+        let client = self.downloader_state.create_client();
 
-        let header_data = HeaderData {
-            url: self.downloader_state.url.clone(),
-            headers: self.downloader_state.headers.clone(),
-            cookies: self.downloader_state.cookies.clone(),
-            authentication: self.downloader_state.authentication.clone(),
-            proxy: self.downloader_state.proxy.clone(),
-        };
-
-        let probe = probe_url(&client, &header_data).await?;
+        let probe = probe_url(&client, &self.downloader_state.url).await?;
 
         log::info!(
             "[select_strategy] resumable={}, file_size={:?}",
@@ -94,10 +81,25 @@ impl HttpDownloader {
         );
 
         let strategy: Arc<dyn DownloadStrategy> = if probe.resumable {
+            // Discover how many concurrent connections the server will accept.
+            // Skips the probe entirely when connections == 1 (fast path).
+            let actual_connections = get_max_connections(
+                &client,
+                &self.downloader_state.url,
+                self.connections,
+            )
+            .await;
+
+            log::info!(
+                "[select_strategy] desired_connections={} actual_connections={}",
+                self.connections,
+                actual_connections
+            );
+
             Arc::new(MultipartDownloadStrategy::from_probe(
                 self.downloader_state.clone(),
                 probe,
-                self.connections,
+                actual_connections,
             ))
         } else {
             Arc::new(OnePartDownloadStrategy::from_probe(

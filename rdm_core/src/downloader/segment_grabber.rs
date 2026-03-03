@@ -1,64 +1,25 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use base64::Engine;
-use futures::StreamExt;
+use futures::{future::join_all, StreamExt};
 use reqwest::Client;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::types::types::{DownloadError, HeaderData, ProbeResult, Segment, SegmentState};
 
-/// Applies common headers (custom headers, cookies, auth) to a request builder.
-/// Skips the `Range` header — rdm sets its own Range per segment/probe, and a
-/// stale browser-captured Range would create a duplicate causing the server
-/// to return incorrect data.
-fn apply_headers(
-    mut builder: reqwest::RequestBuilder,
-    header_data: &HeaderData,
-    precomputed_auth: Option<&str>,
-) -> reqwest::RequestBuilder {
-    for (key, values) in &header_data.headers {
-        if key.eq_ignore_ascii_case("range") {
-            continue;
-        }
-        for value in values {
-            builder = builder.header(key, value);
-        }
-    }
-    if let Some(cookies) = &header_data.cookies {
-        builder = builder.header("Cookie", cookies);
-    }
-    if let Some(auth_value) = precomputed_auth {
-        builder = builder.header("Authorization", auth_value);
-    }
-    builder
-}
 
-/// Pre-computes the Basic auth header value, if authentication is configured.
-fn precompute_auth(header_data: &HeaderData) -> Option<String> {
-    header_data.authentication.as_ref().map(|auth| {
-        let credentials = format!("{}:{}", auth.username, auth.password);
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&credentials);
-        format!("Basic {}", encoded)
-    })
-}
 
 /// Sends a probe request to determine file size, resumability, and metadata.
 /// Uses `Range: bytes=0-0` to request only 1 byte, minimizing wasted bandwidth.
 /// The file size is extracted from the `Content-Range` header.
 pub async fn probe_url(
     client: &Client,
-    header_data: &HeaderData,
+    url : &str,
 ) -> Result<ProbeResult, DownloadError> {
-    let auth_header = precompute_auth(header_data);
-    let builder = client.get(&header_data.url);
-    let mut builder = apply_headers(builder, header_data, auth_header.as_deref());
-
+    let mut builder = client.get(url);
     builder = builder.header("Range", "bytes=0-0");
-
     let response = builder.send().await?;
-
     let resumable = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
 
     // Content-Range (e.g. "bytes 0-0/1234567") is more reliable than Content-Length
@@ -90,11 +51,54 @@ pub async fn probe_url(
             .get("last-modified")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string()),
+        // Populated later by get_max_connections; 0 means "not yet probed".
+        max_connections: 0,
     };
 
     drop(response);
 
     Ok(probe)
+}
+
+
+/// Probes the server with `desired_max` parallel `Range: bytes=0-0` requests
+/// and counts how many succeed (2xx). Returns the number of successes, clamped
+/// to at least 1. Returns immediately with 1 if `desired_max <= 1` to avoid
+/// unnecessary probing.
+///
+/// Use this before starting a multipart download to discover the maximum number
+/// of concurrent connections the server will tolerate, rather than learning the
+/// limit the hard way via mid-download failures.
+pub async fn get_max_connections(client: &Client, url: &str, desired_max: usize) -> usize {
+    if desired_max <= 1 {
+        return 1;
+    }
+    let futures: Vec<_> = (0..desired_max)
+        .map(|_| {
+            let c = client.clone();
+            let u = url.to_string();
+            async move {
+                c.get(&u)
+                    .header("Range", "bytes=0-0")
+                    .timeout(std::time::Duration::from_secs(5))
+                    .send()
+                    .await
+                    .map_or(false, |r| r.status().is_success())
+            }
+        })
+        .collect();
+
+    let results = join_all(futures).await;
+    let successes = results.iter().filter(|&&ok| ok).count();
+
+    log::info!(
+        "[get_max_connections] url={} desired={} successes={}",
+        url,
+        desired_max,
+        successes
+    );
+
+    successes.max(1)
 }
 
 /// Downloads a single segment of a file.
@@ -108,27 +112,22 @@ pub async fn probe_url(
 pub async fn download_segment(
     segment: Segment,
     client: &Client,
-    header_data: &Arc<HeaderData>,
     temp_dir: PathBuf,
     cancel_token: CancellationToken,
     on_progress: impl Fn(u64),
+    url:&str,
 ) -> Result<Segment, DownloadError> {
     let mut segment = segment;
     let mut retries = 0;
     const MAX_RETRIES: usize = 3;
 
     segment.state = SegmentState::Downloading;
-
-    let auth_header = precompute_auth(header_data);
-
     loop {
         if cancel_token.is_cancelled() {
             return Err(DownloadError::Cancelled);
         }
 
-        let builder = client.get(&header_data.url);
-        let mut builder = apply_headers(builder, header_data, auth_header.as_deref());
-
+        let mut builder = client.get(url);
         if segment.length > 0 {
             let start = segment.offset + segment.downloaded;
             let end = segment.offset + segment.length - 1;
@@ -223,7 +222,7 @@ pub async fn download_segment(
 
                     match chunk_result {
                         Ok(chunk) => {
-                            // Cap the write to the remaining bytes this segment needs.
+                            // Cap write to the remaining bytes this segment needs.
                             // Servers may ignore the Range header and send the full
                             // file body even when responding with 206; without this
                             // guard every segment would contain the entire file and the
@@ -348,7 +347,7 @@ fn extract_filename_star(disposition: &str) -> Option<String> {
     let rest = &disposition[idx + key.len()..];
     let rest = rest.split(';').next().unwrap_or(rest).trim();
 
-    // Format: charset'language'encoded-value — only UTF-8 is handled.
+    // Format: charset 'language' encoded-value — only UTF-8 is handled.
     let after_charset = if let Some(s) = rest.strip_prefix("UTF-8''").or_else(|| rest.strip_prefix("utf-8''")) {
         s
     } else {

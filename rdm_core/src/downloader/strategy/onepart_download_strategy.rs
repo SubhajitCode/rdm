@@ -11,7 +11,7 @@ use crate::downloader::segment_grabber::{download_segment, probe_url};
 use crate::downloader::strategy::download_strategy::DownloadStrategy;
 use crate::downloader::util::ensure_extension;
 use crate::types::types::{
-    DownloadError, DownloaderState, HeaderData, ProbeResult, ProgressEvent, Segment,
+    DownloadError, DownloaderState, ProbeResult, ProgressEvent, Segment,
 };
 
 pub struct OnePartDownloadStrategy {
@@ -58,16 +58,6 @@ impl OnePartDownloadStrategy {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn build_header_data(state: &Arc<StdRwLock<DownloaderState>>) -> HeaderData {
-    let s = state.read().unwrap();
-    HeaderData {
-        url: s.url.clone(),
-        headers: s.headers.clone(),
-        cookies: s.cookies.clone(),
-        authentication: s.authentication.clone(),
-        proxy: s.proxy.clone(),
-    }
-}
 
 // ---------------------------------------------------------------------------
 // DownloadStrategy impl
@@ -87,15 +77,15 @@ impl DownloadStrategy for OnePartDownloadStrategy {
     /// If `from_probe` was used, metadata is already populated and no HTTP probe
     /// is issued.  Otherwise, probes the URL to populate state first.
     async fn preprocess(&self) -> Result<(), DownloadError> {
-        let already_probed = {
+        let (already_probed,url) = {
             let s = self.state.read().unwrap();
             // file_size -1 + resumable false == uninitialised (default from DownloaderState::new)
-            s.file_size != -1 || s.content_type.is_some() || s.attachment_name.is_some()
+            (s.file_size != -1 || s.content_type.is_some() || s.attachment_name.is_some(),
+            s.url.clone())
         };
 
         if !already_probed {
-            let header_data = build_header_data(&self.state);
-            let probe = probe_url(&self.client, &header_data).await?;
+            let probe = probe_url(&self.client, url.as_str()).await?;
             let mut s = self.state.write().unwrap();
             s.file_size = probe.resource_size.map(|sz| sz as i64).unwrap_or(-1);
             s.url = probe.final_uri;
@@ -110,7 +100,7 @@ impl DownloadStrategy for OnePartDownloadStrategy {
             .await
             .map_err(DownloadError::Disk)?;
 
-        log::info!("[onepart::preprocess] temp_dir={}", temp_dir_path);
+        log::info!("[one part::preprocess] temp_dir={}", temp_dir_path);
         Ok(())
     }
 
@@ -122,8 +112,6 @@ impl DownloadStrategy for OnePartDownloadStrategy {
             let s = self.state.read().unwrap();
             PathBuf::from(&s.temp_dir)
         };
-
-        let header_data = Arc::new(build_header_data(&self.state));
         let segment_id = Uuid::new_v4().to_string();
         // length == -1 → download without a Range header (full body)
         let segment = Segment::new(segment_id.clone(), 0, -1);
@@ -131,11 +119,14 @@ impl DownloadStrategy for OnePartDownloadStrategy {
         let client = Arc::clone(&self.client);
         let cancel_token = self.cancel_token.clone();
         let segment_id_for_progress = segment_id.clone();
+        let url = {
+            let s = self.state.read().unwrap();
+            s.url.clone()
+        };
 
         let result = download_segment(
             segment,
             &client,
-            &header_data,
             temp_dir.clone(),
             cancel_token,
             |bytes_delta| {
@@ -147,6 +138,7 @@ impl DownloadStrategy for OnePartDownloadStrategy {
                     }));
                 }
             },
+            url.as_str()
         )
         .await;
 
@@ -205,7 +197,7 @@ impl DownloadStrategy for OnePartDownloadStrategy {
 
         tokio::task::spawn_blocking(move || {
             log::info!(
-                "[onepart::postprocess] moving {:?} -> {}",
+                "[one part::postprocess] moving {:?} -> {}",
                 segment_path,
                 output_file
             );
@@ -219,7 +211,7 @@ impl DownloadStrategy for OnePartDownloadStrategy {
 
             let _ = std::fs::remove_dir(&temp_dir);
 
-            log::info!("[onepart::postprocess] complete: output={}", output_file);
+            log::info!("[one part::postprocess] complete: output={}", output_file);
             Ok::<(), std::io::Error>(())
         })
         .await

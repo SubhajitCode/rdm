@@ -51,6 +51,7 @@ pub struct ProbeResult {
     pub attachment_name: Option<String>,
     pub content_type: Option<String>,
     pub last_modified: Option<String>,
+    pub max_connections: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

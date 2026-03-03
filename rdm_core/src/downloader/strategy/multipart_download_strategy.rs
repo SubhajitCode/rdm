@@ -8,10 +8,10 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::downloader::segment_grabber::{download_segment, probe_url};
+use crate::downloader::segment_grabber::{download_segment};
 use crate::downloader::strategy::download_strategy::DownloadStrategy;
 use crate::types::types::{
-    AuthenticationInfo, DownloadError, DownloaderState, HeaderData, ProgressEvent, ProbeResult,
+    AuthenticationInfo, DownloadError, DownloaderState, ProgressEvent, ProbeResult,
     ProxyInfo, Segment, SegmentState,
 };
 
@@ -271,19 +271,6 @@ fn create_segments(file_size: u64, max_connections: usize) -> Vec<Segment> {
     segments
 }
 
-fn build_header_data(
-    state: &Arc<StdRwLock<DownloaderState>>,
-) -> Result<HeaderData, DownloadError> {
-    let s = state.read().unwrap();
-    Ok(HeaderData {
-        url: s.url.clone(),
-        headers: s.headers.clone(),
-        cookies: s.cookies.clone(),
-        authentication: s.authentication.clone(),
-        proxy: s.proxy.clone(),
-    })
-}
-
 // ---------------------------------------------------------------------------
 // DownloadStrategy impl
 // ---------------------------------------------------------------------------
@@ -299,33 +286,12 @@ impl DownloadStrategy for MultipartDownloadStrategy {
     }
 
     async fn preprocess(&self) -> Result<(), DownloadError> {
-        // If `from_probe` was used, state is already populated (file_size != -1 or resumable
-        // is set). We still need to probe when constructed directly via `new`/`from_state`
-        // (file_size == -1 and resumable == false means unprobed).
-        let already_probed = {
-            let s = self.state.read().unwrap();
-            s.file_size != -1 || s.resumable
-        };
 
-        let (resumable, resource_size) = if already_probed {
+        //already probed as part of MultipartDownloadStrategy::from_probe()?
+        let (resumable, resource_size) = {
             let s = self.state.read().unwrap();
             let size = if s.file_size > 0 { Some(s.file_size as u64) } else { None };
             (s.resumable, size)
-        } else {
-            let header_data = build_header_data(&self.state)?;
-            let probe = probe_url(&self.client, &header_data).await?;
-            let resumable = probe.resumable;
-            let resource_size = probe.resource_size;
-            {
-                let mut s = self.state.write().unwrap();
-                s.file_size = resource_size.map(|sz| sz as i64).unwrap_or(-1);
-                s.url = probe.final_uri;
-                s.last_modified = probe.last_modified;
-                s.resumable = resumable;
-                s.attachment_name = probe.attachment_name;
-                s.content_type = probe.content_type;
-            }
-            (resumable, resource_size)
         };
 
         let temp_dir_path = self.state.read().unwrap().temp_dir.clone();
@@ -339,6 +305,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
                     "[preprocess] resumable=true, file_size={}, creating multipart segments with max_connections={}",
                     file_size, self.connections
                 );
+                //different segmentation strategy could be applied here TODO.
                 create_segments(file_size, self.connections)
             } else {
                 log::info!("[preprocess] resumable=true but file_size unknown, using single segment");
@@ -364,7 +331,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         let progress_tx: Option<mpsc::Sender<Result<ProgressEvent, String>>> =
             self.progress_tx.lock().unwrap().clone();
 
-        let header_data = Arc::new(build_header_data(&self.state)?);
+        // let header_data = Arc::new(build_header_data(&self.state)?);
 
         let temp_dir = {
             let s = self.state.read().unwrap();
@@ -389,8 +356,11 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         let mut handles = Vec::with_capacity(segments_to_download.len());
 
         for segment in segments_to_download {
+            let url = {
+                let s = self.state.read().unwrap();
+                s.url.clone()
+            };
             let client = Arc::clone(&self.client);
-            let header_data = Arc::clone(&header_data);
             let temp_dir = temp_dir.clone();
             let cancel_token = self.cancel_token.clone();
             let segment_tx = progress_tx.clone();
@@ -406,7 +376,6 @@ impl DownloadStrategy for MultipartDownloadStrategy {
                 download_segment(
                     segment,
                     &client,
-                    &header_data,
                     temp_dir,
                     cancel_token,
                     |bytes_delta| {
@@ -418,6 +387,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
                             }));
                         }
                     },
+                    url.as_str()
                 )
                 .await
             });

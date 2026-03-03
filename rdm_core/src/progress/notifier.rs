@@ -53,7 +53,7 @@ impl ProgressNotifier {
 
     /// Consume progress messages until the channel closes or an error arrives.
     pub async fn run(
-        mut self,
+        &mut self,
         mut progress_rx: mpsc::Receiver<Result<ProgressEvent, String>>,
     ) {
         while let Some(msg) = progress_rx.recv().await {
@@ -156,7 +156,7 @@ impl ProgressNotifier {
         }
     }
 
-    async fn finish(self) {
+    async fn finish(&self) {
         let elapsed = self.start_time.elapsed();
         let total_downloaded: u64 = self.segments.values().map(|s| s.bytes_downloaded).sum();
         let avg_speed = if elapsed.as_secs_f64() > 0.0 {

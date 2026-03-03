@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{header, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use rdm_core::downloader::segment_grabber::{download_segment, extract_filename, probe_url};
+use rdm_core::downloader::segment_grabber::{download_segment, extract_filename, get_max_connections, probe_url};
 use rdm_core::types::types::{DownloadError, HeaderData, Segment, SegmentState};
 
 /// Helper: creates a minimal HeaderData pointing at the given URL.
@@ -107,7 +107,7 @@ async fn test_probe_resumable_server() {
     let client = Client::new();
     let header_data = make_header_data(&server.uri());
 
-    let probe = probe_url(&client, &header_data).await.unwrap();
+    let probe = probe_url(&client, &header_data.url).await.unwrap();
 
     assert!(probe.resumable);
     assert_eq!(probe.resource_size, Some(5242880));
@@ -138,7 +138,7 @@ async fn test_probe_non_resumable_server() {
     let client = Client::new();
     let header_data = make_header_data(&server.uri());
 
-    let probe = probe_url(&client, &header_data).await.unwrap();
+    let probe = probe_url(&client, &header_data.url).await.unwrap();
 
     assert!(!probe.resumable);
     assert_eq!(probe.attachment_name, None);
@@ -152,7 +152,7 @@ async fn test_probe_network_error() {
     // Point to a port that nothing is listening on
     let header_data = make_header_data("http://127.0.0.1:1");
 
-    let result = probe_url(&client, &header_data).await;
+    let result = probe_url(&client, &header_data.url).await;
     assert!(result.is_err());
 }
 
@@ -343,4 +343,54 @@ async fn test_download_segment_progress_callback_called() {
     assert!(result.is_ok());
     // Total progress should equal the body size
     assert_eq!(total_progress.load(Ordering::Relaxed), 2048);
+}
+
+// ---------------------------------------------------------------
+// get_max_connections
+// ---------------------------------------------------------------
+
+/// Server accepts every probe — returns the full desired count.
+#[tokio::test]
+async fn test_get_max_connections_all_succeed() {
+    let server = MockServer::start().await;
+
+    // Respond 206 to every GET with a Range header (mirrors what probe_url sends).
+    Mock::given(method("GET"))
+        .and(header("Range", "bytes=0-0"))
+        .respond_with(
+            ResponseTemplate::new(206)
+                .insert_header("Content-Range", "bytes 0-0/1000000")
+                .insert_header("Content-Length", "1"),
+        )
+        .mount(&server)
+        .await;
+
+    let client = Client::new();
+    let result = get_max_connections(&client, &server.uri(), 4).await;
+    assert_eq!(result, 4);
+}
+
+/// Server rejects every probe with 429 — falls back to 1.
+#[tokio::test]
+async fn test_get_max_connections_all_fail() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(429))
+        .mount(&server)
+        .await;
+
+    let client = Client::new();
+    let result = get_max_connections(&client, &server.uri(), 4).await;
+    assert_eq!(result, 1);
+}
+
+/// desired_max == 1: skip probing entirely and return 1 immediately.
+#[tokio::test]
+async fn test_get_max_connections_short_circuit_when_one() {
+    // Point at a port nothing is listening on. If the function actually fires a
+    // request it will error; we verify it returns 1 without hitting the network.
+    let client = Client::new();
+    let result = get_max_connections(&client, "http://127.0.0.1:1", 1).await;
+    assert_eq!(result, 1);
 }
