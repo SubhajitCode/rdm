@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::downloader::segment_grabber::{download_segment};
+use crate::downloader::segment_grabber::{download_segment, probe_url};
 use crate::downloader::strategy::download_strategy::DownloadStrategy;
 use crate::types::types::{
     AuthenticationInfo, DownloadError, DownloaderState, ProgressEvent, ProbeResult,
@@ -287,7 +287,28 @@ impl DownloadStrategy for MultipartDownloadStrategy {
 
     async fn preprocess(&self) -> Result<(), DownloadError> {
 
-        //already probed as part of MultipartDownloadStrategy::from_probe()?
+        // If state was pre-populated via from_probe(), skip probing.
+        // Otherwise (e.g. created via new()), probe the URL now.
+        let needs_probe = {
+            let s = self.state.read().unwrap();
+            s.file_size <= 0 && !s.resumable
+        };
+
+        if needs_probe {
+            let (url, client) = {
+                let s = self.state.read().unwrap();
+                (s.url.clone(), self.client.clone())
+            };
+            let probe = probe_url(&client, &url).await?;
+            let mut s = self.state.write().unwrap();
+            s.resumable = probe.resumable;
+            s.file_size = probe.resource_size.map(|sz| sz as i64).unwrap_or(-1);
+            s.url = probe.final_uri;
+            s.attachment_name = probe.attachment_name;
+            s.content_type = probe.content_type;
+            s.last_modified = probe.last_modified;
+        }
+
         let (resumable, resource_size) = {
             let s = self.state.read().unwrap();
             let size = if s.file_size > 0 { Some(s.file_size as u64) } else { None };

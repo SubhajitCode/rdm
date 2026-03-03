@@ -1,12 +1,11 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use futures::{future::join_all, StreamExt};
 use reqwest::Client;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::types::types::{DownloadError, HeaderData, ProbeResult, Segment, SegmentState};
+use crate::types::types::{DownloadError, ProbeResult, Segment, SegmentState};
 
 
 

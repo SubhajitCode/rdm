@@ -184,12 +184,12 @@ async fn test_download_segment_full_body() {
     let result = download_segment(
         segment,
         &client,
-        &header_data,
         temp_dir.path().to_path_buf(),
         cancel_token,
         move |bytes| {
             progress_clone.fetch_add(bytes, Ordering::Relaxed);
         },
+        &header_data.url,
     )
     .await;
 
@@ -225,10 +225,10 @@ async fn test_download_segment_with_range() {
     let result = download_segment(
         segment,
         &client,
-        &header_data,
         temp_dir.path().to_path_buf(),
         cancel_token,
         |_| {},
+        &header_data.url,
     )
     .await;
 
@@ -267,10 +267,10 @@ async fn test_download_segment_cancellation() {
     let result = download_segment(
         segment,
         &client,
-        &header_data,
         temp_dir.path().to_path_buf(),
         cancel_token,
         |_| {},
+        &header_data.url,
     )
     .await;
 
@@ -294,10 +294,10 @@ async fn test_download_segment_retries_on_failure() {
     let result = download_segment(
         segment,
         &client,
-        &header_data,
         temp_dir.path().to_path_buf(),
         cancel_token,
         |_| {},
+        &header_data.url,
     )
     .await;
 
@@ -331,12 +331,12 @@ async fn test_download_segment_progress_callback_called() {
     let result = download_segment(
         segment,
         &client,
-        &header_data,
         temp_dir.path().to_path_buf(),
         cancel_token,
         move |bytes| {
             total_progress_clone.fetch_add(bytes, Ordering::Relaxed);
         },
+        &header_data.url,
     )
     .await;
 
