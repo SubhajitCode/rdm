@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use futures::{future::join_all, StreamExt};
+use futures::StreamExt;
 use reqwest::Client;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
@@ -56,7 +56,6 @@ pub async fn probe_url(
             .get("last-modified")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string()),
-        // Populated later by get_max_connections; 0 means "not yet probed".
         max_connections: 0,
     };
 
@@ -65,46 +64,6 @@ pub async fn probe_url(
     Ok(probe)
 }
 
-
-/// Probes the server with `desired_max` parallel `Range: bytes=0-0` requests
-/// and counts how many succeed (2xx). Returns the number of successes, clamped
-/// to at least 1. Returns immediately with 1 if `desired_max <= 1` to avoid
-/// unnecessary probing.
-///
-/// Use this before starting a multipart download to discover the maximum number
-/// of concurrent connections the server will tolerate, rather than learning the
-/// limit the hard way via mid-download failures.
-pub async fn get_max_connections(client: &Client, url: &str, desired_max: usize) -> usize {
-    if desired_max <= 1 {
-        return 1;
-    }
-    let futures: Vec<_> = (0..desired_max)
-        .map(|_| {
-            let c = client.clone();
-            let u = url.to_string();
-            async move {
-                c.get(&u)
-                    .header("Range", "bytes=0-0")
-                    .timeout(std::time::Duration::from_secs(5))
-                    .send()
-                    .await
-                    .map_or(false, |r| r.status().is_success())
-            }
-        })
-        .collect();
-
-    let results = join_all(futures).await;
-    let successes = results.iter().filter(|&&ok| ok).count();
-
-    log::info!(
-        "[get_max_connections] url={} desired={} successes={}",
-        url,
-        desired_max,
-        successes
-    );
-
-    successes.max(1)
-}
 
 /// Downloads a single segment of a file.
 ///
