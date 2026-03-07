@@ -569,7 +569,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         .await
         .map_err(|e| DownloadError::SegmentFailed(e.to_string()))?
         .map_err(DownloadError::Disk)?;
-
+        self.clear_progress_tx();
         Ok(())
     }
 }
