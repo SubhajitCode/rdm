@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 
 use async_trait::async_trait;
 use reqwest::{Client};
-use tokio::sync::{mpsc, RwLock, Semaphore};
+use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -394,12 +394,8 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             return Ok(());
         }
 
-        // Semaphore limits the number of concurrent active HTTP data streams.
-        // Each task acquires a permit before opening its GET request and holds it
-        // for the full download duration. Tasks that retry after a 503/429 release
-        // their permit during the backoff sleep so other segments can proceed.
-        let semaphore = Arc::new(Semaphore::new(self.connections));
-
+        // download_segment() marks segments as Downloading at segment_grabber.rs:90;
+        // the cloned copies in the HashMap are not read during the download phase.
         let mut handles = Vec::with_capacity(segments_to_download.len());
 
         for segment in segments_to_download {
@@ -415,12 +411,8 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             } else {
                 None
             };
-            let sem = Arc::clone(&semaphore);
 
             let handle = tokio::spawn(async move {
-                // Acquire a slot before opening the HTTP connection.
-                // The permit is dropped (released) when this async block completes.
-                let _permit = sem.acquire_owned().await.unwrap();
                 download_segment(
                     segment,
                     &client,
