@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::downloader::segment_grabber::{get_max_connections, probe_url};
+use crate::downloader::segment_grabber::{probe_url};
 use crate::downloader::strategy::download_strategy::{DownloadStrategy, DownloadStrategyFactory};
 use crate::downloader::strategy::multipart_download_strategy::MultipartDownloadStrategy;
 use crate::downloader::strategy::onepart_download_strategy::OnePartDownloadStrategy;
@@ -37,8 +37,6 @@ pub struct HttpDownloader {
     notifier: Arc<ProgressNotifier>,
     downloader_state: DownloaderState,
     connections: usize,
-    /// Optional custom strategy factory. Falls back to `DefaultStrategyFactory` when `None`.
-    strategy_factory: Option<Box<dyn DownloadStrategyFactory>>,
 }
 
 impl HttpDownloader {
@@ -48,14 +46,7 @@ impl HttpDownloader {
             download_strategy: None,
             downloader_state,
             connections,
-            strategy_factory: None,
         }
-    }
-
-    /// Override the default strategy selection logic with a custom factory.
-    pub fn with_strategy_factory(mut self, factory: Box<dyn DownloadStrategyFactory>) -> Self {
-        self.strategy_factory = Some(factory);
-        self
     }
 
     /// Register a progress observer and return its ID (pass to `remove_observer` to deregister).
@@ -117,26 +108,11 @@ impl HttpDownloader {
             probe.resource_size
         );
 
-        let strategy = if let Some(factory) = &self.strategy_factory {
-            // Use the injected factory (enables custom strategies and testability).
-            factory.create(self.downloader_state.clone(), probe, self.connections)
-        } else {
+        let strategy = {
             // Default: multipart for resumable, onepart otherwise.
-            let connections = if probe.resumable {
-                // Discover how many concurrent connections the server will accept.
-                // Skips the probe entirely when connections == 1 (fast path).
-                let actual = get_max_connections(&client, &self.downloader_state.url, self.connections).await;
-                log::info!(
-                    "[select_strategy] desired_connections={} actual_connections={}",
-                    self.connections, actual
-                );
-                actual
-            } else {
-                1
-            };
 
             let default_factory = DefaultStrategyFactory;
-            default_factory.create(self.downloader_state.clone(), probe, connections)
+            default_factory.create(self.downloader_state.clone(), probe, self.connections)
         };
 
         Ok(strategy)
