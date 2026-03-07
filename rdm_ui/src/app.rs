@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use crate::api::{
     cancel_download, subscribe_progress, trigger_download, DownloadRequest, ProgressSnapshot,
-    VideoItem,
+    SegmentSnapshot, VideoItem,
 };
 use crate::styles::APP_CSS;
 
@@ -161,13 +161,15 @@ fn FilePickerView(video: VideoItem, mut view: Signal<View>) -> Element {
 #[component]
 fn ProgressView(download_id: String, title: String) -> Element {
     let mut snapshot = use_signal(|| ProgressSnapshot {
+        segments: Vec::new(),
         total_bytes_downloaded: 0,
         total_bytes: 0,
         speed: 0.0,
         eta_secs: 0.0,
         done: false,
     });
-    let mut error_msg = use_signal(|| String::new());
+    let mut error_msg    = use_signal(|| String::new());
+    let mut show_segments = use_signal(|| false);
 
     let id_for_sse = download_id.clone();
     use_effect(move || {
@@ -185,7 +187,6 @@ fn ProgressView(download_id: String, title: String) -> Element {
     } else {
         0.0
     };
-    let speed_mb      = snap.speed / (1024.0 * 1024.0);
     let downloaded_mb = snap.total_bytes_downloaded as f64 / (1024.0 * 1024.0);
     let total_mb      = snap.total_bytes as f64 / (1024.0 * 1024.0);
     let is_done       = snap.done;
@@ -198,7 +199,10 @@ fn ProgressView(download_id: String, title: String) -> Element {
         "Calculating…".to_string()
     };
 
-    let bar_width = format!("{:.2}%", pct);
+    let bar_width        = format!("{:.2}%", pct);
+    let speed_str        = if is_done { "—".to_string() } else { format_speed(snap.speed) };
+    let has_segments     = snap.segments.len() > 1;
+    let segments_visible = show_segments();
 
     rsx! {
         div { class: "view",
@@ -234,14 +238,30 @@ fn ProgressView(download_id: String, title: String) -> Element {
                         style: "width: {bar_width};",
                     }
                 }
+
+                // Segments toggle — only visible when there are multiple segments
+                if has_segments {
+                    button {
+                        class: "segments-toggle",
+                        onclick: move |_| show_segments.set(!show_segments()),
+                        if segments_visible { "▾ Segments" } else { "▸ Segments" }
+                    }
+                }
+
+                // Per-segment bars panel (shown only when toggled on)
+                if has_segments && segments_visible {
+                    div { class: "segments-panel",
+                        for seg in snap.segments.iter() {
+                            { segment_bar(seg) }
+                        }
+                    }
+                }
             }
 
             div { class: "stats-row",
                 div { class: "stat-card",
                     div { class: "stat-label", "Speed" }
-                    div { class: "stat-value",
-                        if is_done { "—" } else { "{speed_mb:.2} MB/s" }
-                    }
+                    div { class: "stat-value", "{speed_str}" }
                 }
                 div { class: "stat-card",
                     div { class: "stat-label", "ETA" }
@@ -359,5 +379,55 @@ fn format_eta(secs: f64) -> String {
         format!("{}m {}s", s / 60, s % 60)
     } else {
         format!("{}s", s)
+    }
+}
+
+/// Format a bytes-per-second speed value with an appropriate unit.
+fn format_speed(bps: f64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * KB;
+    const GB: f64 = 1024.0 * MB;
+    if bps >= GB {
+        format!("{:.2} GB/s", bps / GB)
+    } else if bps >= MB {
+        format!("{:.2} MB/s", bps / MB)
+    } else if bps >= KB {
+        format!("{:.1} KB/s", bps / KB)
+    } else {
+        format!("{:.0} B/s", bps)
+    }
+}
+
+/// Render a single segment progress row (label + mini bar).
+fn segment_bar(seg: &SegmentSnapshot) -> Element {
+    const MB: f64 = 1024.0 * 1024.0;
+
+    let start_mb = seg.offset as f64 / MB;
+    let end_mb   = (seg.offset + seg.total_bytes) as f64 / MB;
+    let label    = if seg.total_bytes > 0 {
+        format!("{:.0}–{:.0} MB", start_mb, end_mb)
+    } else {
+        "…".to_string()
+    };
+
+    let pct = if seg.total_bytes > 0 {
+        (seg.bytes_downloaded as f64 / seg.total_bytes as f64 * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+    let fill_width = format!("{:.2}%", pct);
+    let is_done    = seg.bytes_downloaded >= seg.total_bytes && seg.total_bytes > 0;
+
+    rsx! {
+        div { class: "seg-row",
+            span { class: "seg-label", "{label}" }
+            div { class: "seg-bar-track",
+                div {
+                    class: if is_done { "seg-bar-fill seg-bar-fill--green" } else { "seg-bar-fill" },
+                    style: "width: {fill_width};",
+                }
+            }
+            span { class: "seg-pct", "{pct:.0}%" }
+        }
     }
 }

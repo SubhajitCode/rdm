@@ -47,8 +47,18 @@ pub struct DownloadResponse {
     pub status: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SegmentSnapshot {
+    pub segment_id: String,
+    pub offset: u64,
+    pub bytes_downloaded: u64,
+    pub total_bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgressSnapshot {
+    #[serde(default)]
+    pub segments: Vec<SegmentSnapshot>,
     pub total_bytes_downloaded: u64,
     pub total_bytes: u64,
     pub speed: f64,

@@ -19,12 +19,14 @@ use crate::downloader::segment_grabber::probe_url;
 pub(crate) fn make_progress_sender(
     tx: Option<mpsc::Sender<Result<ProgressEvent, String>>>,
     segment_id: String,
+    offset: u64,
     total_bytes: Option<u64>,
 ) -> impl Fn(u64) {
     move |bytes_delta| {
         if let Some(ref tx) = tx {
             let _ = tx.try_send(Ok(ProgressEvent {
                 segment_id: segment_id.clone(),
+                offset,
                 bytes_delta,
                 total_bytes,
             }));

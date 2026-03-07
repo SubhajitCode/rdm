@@ -146,6 +146,8 @@ pub enum DownloadError {
 #[derive(Debug, Clone, Serialize)]
 pub struct ProgressEvent {
     pub segment_id: String,
+    /// Byte offset of this segment within the file (used to label segment bars in the UI).
+    pub offset: u64,
     pub bytes_delta: u64,
     pub total_bytes: Option<u64>,
 }
@@ -229,7 +231,10 @@ impl DownloaderState {
                     builder = builder.proxy(proxy);
                 }
                 Err(e) => {
-                    log::warn!("Proxy configuration error — downloading without proxy: {}", e);
+                    log::warn!(
+                        "Proxy configuration error — downloading without proxy: {}",
+                        e
+                    );
                 }
             }
         }

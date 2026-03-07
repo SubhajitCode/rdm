@@ -119,7 +119,7 @@ impl DownloadStrategy for OnePartDownloadStrategy {
             &client,
             temp_dir.clone(),
             cancel_token,
-            make_progress_sender(progress_tx.clone(), segment_id_for_progress, None),
+            make_progress_sender(progress_tx.clone(), segment_id_for_progress, 0, None),
             url.as_str()
         )
         .await;

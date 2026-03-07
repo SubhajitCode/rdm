@@ -406,6 +406,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             let segment_tx = progress_tx.clone();
             let segment_id_for_progress = segment.id.clone();
             let segment_id_for_handle = segment.id.clone();
+            let segment_offset = segment.offset.max(0) as u64;
             let segment_total_bytes = if segment.length > 0 {
                 Some(segment.length as u64)
             } else {
@@ -418,7 +419,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
                     &client,
                     temp_dir,
                     cancel_token,
-                    make_progress_sender(segment_tx, segment_id_for_progress, segment_total_bytes),
+                    make_progress_sender(segment_tx, segment_id_for_progress, segment_offset, segment_total_bytes),
                     url.as_str()
                 )
                 .await

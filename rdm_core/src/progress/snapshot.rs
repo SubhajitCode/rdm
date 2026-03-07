@@ -4,6 +4,8 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize)]
 pub struct SegmentSnapshot {
     pub segment_id: String,
+    /// Byte offset of this segment within the file (0 for the first segment).
+    pub offset: u64,
     pub bytes_downloaded: u64,
     pub total_bytes: u64,
     pub speed: f64,

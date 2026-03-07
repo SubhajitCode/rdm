@@ -247,6 +247,75 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .bar-fill--blue  { background: #89b4fa; }
 .bar-fill--green { background: #a6e3a1; }
 
+/* ── Progress: segments toggle button ───────────────────────────────────── */
+.segments-toggle {
+  display: inline-block;
+  margin-top: 8px;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 11px;
+  font-weight: 500;
+  color: #6c7086;
+  cursor: pointer;
+  letter-spacing: 0.03em;
+  transition: color 0.15s;
+}
+
+.segments-toggle:hover { color: #89b4fa; opacity: 1; }
+
+/* ── Progress: per-segment bars panel ───────────────────────────────────── */
+.segments-panel {
+  margin-top: 6px;
+  max-height: 130px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.seg-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.seg-label {
+  font-size: 10px;
+  color: #6c7086;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  white-space: nowrap;
+  width: 80px;
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.seg-bar-track {
+  flex: 1;
+  background: #313244;
+  border-radius: 3px;
+  height: 4px;
+  overflow: hidden;
+}
+
+.seg-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: #89b4fa;
+  transition: width 0.4s ease;
+}
+
+.seg-bar-fill--green { background: #a6e3a1; }
+
+.seg-pct {
+  font-size: 10px;
+  color: #6c7086;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  width: 30px;
+  flex-shrink: 0;
+  text-align: right;
+}
+
 /* ── Progress: stat cards ────────────────────────────────────────────────── */
 .stats-row {
   display: flex;
