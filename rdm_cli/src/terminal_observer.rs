@@ -30,7 +30,18 @@ impl TerminalProgressObserver {
     fn ensure_bars(&self, snapshot: &ProgressSnapshot) {
         let mut bars = self.bars.lock().unwrap();
         let mut total_bar = self.total_bar.lock().unwrap();
+        // Total bar (created once)
+        if total_bar.is_none() && snapshot.total_bytes > 0 {
+            let style = ProgressStyle::with_template(
+                "Total [{bar:30.green/white}] {bytes}/{total_bytes} ({binary_bytes_per_sec}) ETA {eta}",
+            )
+                .unwrap()
+                .progress_chars("=>-");
 
+            let pb = self.multi.add(ProgressBar::new(snapshot.total_bytes.max(1)));
+            pb.set_style(style);
+            *total_bar = Some(pb);
+        }
         // Per-segment bars
         for segment in &snapshot.segments {
             if !bars.contains_key(&segment.segment_id) {
@@ -45,19 +56,6 @@ impl TerminalProgressObserver {
                 pb.set_message(segment.segment_id.clone());
                 bars.insert(segment.segment_id.clone(), pb);
             }
-        }
-
-        // Total bar (created once)
-        if total_bar.is_none() && snapshot.total_bytes > 0 {
-            let style = ProgressStyle::with_template(
-                "Total [{bar:30.green/white}] {bytes}/{total_bytes} ({binary_bytes_per_sec}) ETA {eta}",
-            )
-            .unwrap()
-            .progress_chars("=>-");
-
-            let pb = self.multi.add(ProgressBar::new(snapshot.total_bytes.max(1)));
-            pb.set_style(style);
-            *total_bar = Some(pb);
         }
     }
 
