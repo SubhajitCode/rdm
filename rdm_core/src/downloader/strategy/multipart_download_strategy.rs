@@ -340,7 +340,9 @@ impl DownloadStrategy for MultipartDownloadStrategy {
                     let s = self.state.read().unwrap();
                     s.url.clone()
                 };
-                create_segments(file_size, self.connections,&client,&url).await
+                let segment = create_segments(file_size, self.connections,&client,&url).await;
+                log::info!("created {} segments", segment.len());
+                segment
             } else {
                 log::info!("[preprocess] resumable=true but file_size unknown, using single segment");
                 vec![Segment::new(Uuid::new_v4().to_string(), 0, -1)]
@@ -377,6 +379,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             let s = self.state.read().unwrap();
             s.url.clone()
         });
+        println!("download url: {}, connections {}", url, self.segments.read().await.len());
 
         let segments_to_download: Vec<Segment> = {
             let segments_guard = self.segments.read().await;

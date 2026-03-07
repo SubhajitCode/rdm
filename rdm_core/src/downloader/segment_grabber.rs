@@ -416,7 +416,7 @@ fn extract_filename_plain(disposition: &str) -> Option<String> {
 pub(crate) async fn probe_segment(client: &Client, url: &String, segment: &Segment) -> Result<String, DownloadError> {
     // Use HEAD so the server never streams a body — the probe only checks
     // that the byte range is accessible, not that data can actually be transferred.
-    let mut builder = client.head(url);
+    let mut builder = client.get(url);
 
     if segment.length > 0 {
         // probe the exact byte range for this segment

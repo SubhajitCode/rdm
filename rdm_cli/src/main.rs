@@ -35,7 +35,7 @@ async fn main() {
     let mut downloader = HttpDownloader::new(state, connections);
     downloader.add_observer(Box::new(TerminalProgressObserver::new()));
 
-    println!("Starting download: {}", url);
+    println!("Starting download: {} with {} connections", url,connections);
     let start = Instant::now();
 
     match downloader.download().await {
