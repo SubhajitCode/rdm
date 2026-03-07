@@ -13,6 +13,15 @@ fn retry_backoff_ms(attempt: usize) -> u64 {
     100u64 * (1u64 << attempt.min(5))
 }
 
+/// Returns backoff delay for server-busy responses (503 / 429).
+/// These mean a concurrent connection holds the server's slot, so we must
+/// wait long enough for an active download to finish before retrying.
+/// Sequence: 5s, 12s, 25s, 45s, 75s, 120s, then 120s for all further attempts.
+fn server_busy_backoff_ms(attempt: usize) -> u64 {
+    const STEPS: &[u64] = &[5_000, 12_000, 25_000, 45_000, 75_000, 120_000];
+    STEPS.get(attempt.saturating_sub(1)).copied().unwrap_or(120_000)
+}
+
 
 
 /// Sends a probe request to determine file size, resumability, and metadata.
@@ -83,7 +92,10 @@ pub async fn download_segment(
 ) -> Result<Segment, DownloadError> {
     let mut segment = segment;
     let mut retries = 0;
-    const MAX_RETRIES: usize = 3;
+    // Server-busy (503/429): use a longer backoff and more retries because these
+    // mean "a concurrent connection holds the slot" — we must wait for it to finish.
+    const MAX_RETRIES: usize = 5;
+    const MAX_RETRIES_SERVER_BUSY: usize = 10;
 
     segment.state = SegmentState::Downloading;
     loop {
@@ -116,23 +128,41 @@ pub async fn download_segment(
                     segment.id, status, content_length, segment.length
                 );
 
-                // Non-2xx responses (e.g. 503 Service Unavailable, 429 Too Many Requests)
-                // are valid HTTP but indicate a server-side error. reqwest::send() succeeds
-                // at the transport level, so these would otherwise fall through and write the
-                // error response body (e.g. an HTML error page) into the segment temp file.
-                // Treat them as retryable failures instead.
+                // Non-2xx responses are retryable. 503/429 mean the server is
+                // concurrency-limited: use a much longer backoff so active downloads
+                // have time to finish and free a slot before we retry.
                 if !status.is_success() {
+                    let is_server_busy = status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+                        || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+                    let max_retries = if is_server_busy { MAX_RETRIES_SERVER_BUSY } else { MAX_RETRIES };
+
+                    retries += 1;
                     log::warn!(
                         "[download_segment] segment={}: received non-success status={}, retrying (attempt {}/{})",
-                        segment.id, status, retries + 1, MAX_RETRIES
+                        segment.id, status, retries, max_retries
                     );
-                    retries += 1;
-                    if retries >= MAX_RETRIES {
+                    if retries >= max_retries {
                         segment.state = SegmentState::Failed;
                         return Err(DownloadError::MaxRetryExceeded);
                     }
-                    // Exponential backoff: 200ms, 400ms, 800ms
-                    let delay_ms = retry_backoff_ms(retries);
+
+                    let delay_ms = if is_server_busy {
+                        // Respect Retry-After if present (value is in seconds).
+                        let retry_after = response
+                            .headers()
+                            .get("retry-after")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .map(|s| s * 1000);
+                        retry_after.unwrap_or_else(|| server_busy_backoff_ms(retries))
+                    } else {
+                        retry_backoff_ms(retries)
+                    };
+
+                    log::info!(
+                        "[download_segment] segment={}: backing off {}ms before retry",
+                        segment.id, delay_ms
+                    );
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     continue;
                 }
@@ -384,6 +414,8 @@ fn extract_filename_plain(disposition: &str) -> Option<String> {
 }
 
 pub(crate) async fn probe_segment(client: &Client, url: &String, segment: &Segment) -> Result<String, DownloadError> {
+    // Use HEAD so the server never streams a body — the probe only checks
+    // that the byte range is accessible, not that data can actually be transferred.
     let mut builder = client.head(url);
 
     if segment.length > 0 {
