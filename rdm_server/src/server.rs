@@ -142,7 +142,7 @@ async fn media_handler(
         .and_then(|v| v.as_array())
         .and_then(|a| a.first())
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .map(|s| sanitize_header_value(s));
 
     let item = VideoListItem {
         id:               id.clone(),
@@ -154,7 +154,7 @@ async fn media_handler(
         request_headers:  data.request_headers.clone(),
         response_headers: data.response_headers.clone(),
         method:           data.method.clone(),
-        user_agent:       data.user_agent.clone(),
+        user_agent:       data.user_agent.as_deref().map(sanitize_header_value),
         tab_url:          data.tab_url.clone(),
         referer,
     };
@@ -205,9 +205,9 @@ async fn download_handler(
         request_headers:  req.request_headers,
         response_headers: HashMap::new(),
         method:           None,
-        user_agent:       req.user_agent,
+        user_agent:       req.user_agent.as_deref().map(sanitize_header_value),
         tab_url:          None,
-        referer:          req.referer,
+        referer:          req.referer.as_deref().map(sanitize_header_value),
     };
 
     spawn_download_to_path(item, req.output_path, Arc::clone(&state));
@@ -555,6 +555,13 @@ fn uuid_from_url(url: &str) -> String {
     let mut h = DefaultHasher::new();
     url.hash(&mut h);
     format!("{:016x}", h.finish())
+}
+
+/// Strip control characters that could enable HTTP header injection (`\r`, `\n`, `\0`).
+fn sanitize_header_value(s: &str) -> String {
+    s.chars()
+        .filter(|&c| c != '\r' && c != '\n' && c != '\0')
+        .collect()
 }
 
 #[allow(dead_code)]

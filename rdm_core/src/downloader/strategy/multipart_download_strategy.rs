@@ -8,10 +8,12 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::downloader::segment_grabber::{download_segment, probe_url};
+use crate::downloader::make_progress_sender;
+use crate::downloader::probe_if_needed;
+use crate::downloader::segment_grabber::download_segment;
 use crate::downloader::strategy::download_strategy::DownloadStrategy;
 use crate::types::types::{
-    AuthenticationInfo, DownloadError, DownloaderState, ProgressEvent, ProbeResult,
+    AuthenticationInfo, DownloadError, DownloadPhase, DownloaderState, ProgressEvent, ProbeResult,
     ProxyInfo, Segment, SegmentState,
 };
 
@@ -286,28 +288,11 @@ impl DownloadStrategy for MultipartDownloadStrategy {
     }
 
     async fn preprocess(&self) -> Result<(), DownloadError> {
+        // Probe the URL only if state was not pre-populated (e.g. via `from_probe()`).
+        probe_if_needed(&self.state, &self.client).await?;
 
-        // If state was pre-populated via from_probe(), skip probing.
-        // Otherwise (e.g. created via new()), probe the URL now.
-        let needs_probe = {
-            let s = self.state.read().unwrap();
-            s.file_size <= 0 && !s.resumable
-        };
-
-        if needs_probe {
-            let (url, client) = {
-                let s = self.state.read().unwrap();
-                (s.url.clone(), self.client.clone())
-            };
-            let probe = probe_url(&client, &url).await?;
-            let mut s = self.state.write().unwrap();
-            s.resumable = probe.resumable;
-            s.file_size = probe.resource_size.map(|sz| sz as i64).unwrap_or(-1);
-            s.url = probe.final_uri;
-            s.attachment_name = probe.attachment_name;
-            s.content_type = probe.content_type;
-            s.last_modified = probe.last_modified;
-        }
+        // Metadata is ready; transition to Segmenting.
+        self.state.write().unwrap().set_phase(DownloadPhase::Segmenting);
 
         let (resumable, resource_size) = {
             let s = self.state.read().unwrap();
@@ -326,7 +311,6 @@ impl DownloadStrategy for MultipartDownloadStrategy {
                     "[preprocess] resumable=true, file_size={}, creating multipart segments with max_connections={}",
                     file_size, self.connections
                 );
-                //different segmentation strategy could be applied here TODO.
                 create_segments(file_size, self.connections)
             } else {
                 log::info!("[preprocess] resumable=true but file_size unknown, using single segment");
@@ -349,15 +333,21 @@ impl DownloadStrategy for MultipartDownloadStrategy {
     }
 
     async fn download(&self) -> Result<(), DownloadError> {
+        self.state.write().unwrap().set_phase(DownloadPhase::Downloading { progress: None });
+
         let progress_tx: Option<mpsc::Sender<Result<ProgressEvent, String>>> =
             self.progress_tx.lock().unwrap().clone();
-
-        // let header_data = Arc::new(build_header_data(&self.state)?);
 
         let temp_dir = {
             let s = self.state.read().unwrap();
             PathBuf::from(&s.temp_dir)
         };
+
+        // Extract URL once and share via Arc — avoids one String clone per spawned task.
+        let url: Arc<String> = Arc::new({
+            let s = self.state.read().unwrap();
+            s.url.clone()
+        });
 
         let segments_to_download: Vec<Segment> = {
             let segments_guard = self.segments.read().await;
@@ -377,10 +367,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         let mut handles = Vec::with_capacity(segments_to_download.len());
 
         for segment in segments_to_download {
-            let url = {
-                let s = self.state.read().unwrap();
-                s.url.clone()
-            };
+            let url = Arc::clone(&url);
             let client = Arc::clone(&self.client);
             let temp_dir = temp_dir.clone();
             let cancel_token = self.cancel_token.clone();
@@ -399,15 +386,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
                     &client,
                     temp_dir,
                     cancel_token,
-                    |bytes_delta| {
-                        if let Some(tx) = &segment_tx {
-                            let _ = tx.try_send(Ok(ProgressEvent {
-                                segment_id: segment_id_for_progress.clone(),
-                                bytes_delta,
-                                total_bytes: segment_total_bytes,
-                            }));
-                        }
-                    },
+                    make_progress_sender(segment_tx, segment_id_for_progress, segment_total_bytes),
                     url.as_str()
                 )
                 .await
@@ -453,7 +432,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
 
         if let Some(e) = first_error {
             if let Some(tx) = &progress_tx {
-                let _ = tx.try_send(Err(e.to_string()));
+                let _ = tx.try_send(Err::<ProgressEvent, String>(e.to_string()));
             }
             return Err(e);
         }
@@ -474,6 +453,8 @@ impl DownloadStrategy for MultipartDownloadStrategy {
     /// Assembles all downloaded segments into the final output file.
     /// Sorts segments by offset and concatenates their temp files.
     async fn postprocess(&self) -> Result<(), DownloadError> {
+        self.state.write().unwrap().set_phase(DownloadPhase::Assembling);
+
         let (segment_ids, temp_dir, output_file) = {
             let segments = self.segments.read().await;
             let state = self.state.read().unwrap();

@@ -7,6 +7,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::types::types::{DownloadError, ProbeResult, Segment, SegmentState};
 
+/// Returns the exponential backoff delay in milliseconds for a given retry attempt.
+/// Produces: attempt 1→200ms, 2→400ms, 3→800ms, capped at 32×100ms = 3200ms.
+fn retry_backoff_ms(attempt: usize) -> u64 {
+    100u64 * (1u64 << attempt.min(5))
+}
+
 
 
 /// Sends a probe request to determine file size, resumability, and metadata.
@@ -167,7 +173,7 @@ pub async fn download_segment(
                         return Err(DownloadError::MaxRetryExceeded);
                     }
                     // Exponential backoff: 200ms, 400ms, 800ms
-                    let delay_ms = 100u64 * (1u64 << retries.min(5));
+                    let delay_ms = retry_backoff_ms(retries);
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     continue;
                 }
@@ -274,7 +280,7 @@ pub async fn download_segment(
                         return Err(DownloadError::MaxRetryExceeded);
                     }
                     // Exponential backoff: 100ms, 200ms, 400ms
-                    let delay_ms = 100u64 * (1u64 << retries.min(5));
+                    let delay_ms = retry_backoff_ms(retries);
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     continue;
                 }
@@ -304,7 +310,7 @@ pub async fn download_segment(
                         return Err(DownloadError::MaxRetryExceeded);
                     }
                     // Exponential backoff: 200ms, 400ms, 800ms
-                    let delay_ms = 100u64 * (1u64 << retries.min(5));
+                    let delay_ms = retry_backoff_ms(retries);
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     continue;
                 }
@@ -319,7 +325,7 @@ pub async fn download_segment(
                     return Err(DownloadError::MaxRetryExceeded);
                 }
                 // Exponential backoff: 100ms, 200ms, 400ms
-                let delay_ms = 100u64 * (1u64 << retries.min(5));
+                let delay_ms = retry_backoff_ms(retries);
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }
         }

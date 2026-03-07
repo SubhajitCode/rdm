@@ -7,11 +7,13 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::downloader::segment_grabber::{download_segment, probe_url};
+use crate::downloader::make_progress_sender;
+use crate::downloader::probe_if_needed;
+use crate::downloader::segment_grabber::download_segment;
 use crate::downloader::strategy::download_strategy::DownloadStrategy;
 use crate::downloader::util::ensure_extension;
 use crate::types::types::{
-    DownloadError, DownloaderState, ProbeResult, ProgressEvent, Segment,
+    DownloadError, DownloadPhase, DownloaderState, ProbeResult, ProgressEvent, Segment,
 };
 
 pub struct OnePartDownloadStrategy {
@@ -77,23 +79,8 @@ impl DownloadStrategy for OnePartDownloadStrategy {
     /// If `from_probe` was used, metadata is already populated and no HTTP probe
     /// is issued.  Otherwise, probes the URL to populate state first.
     async fn preprocess(&self) -> Result<(), DownloadError> {
-        let (already_probed,url) = {
-            let s = self.state.read().unwrap();
-            // file_size -1 + resumable false == uninitialised (default from DownloaderState::new)
-            (s.file_size != -1 || s.content_type.is_some() || s.attachment_name.is_some(),
-            s.url.clone())
-        };
-
-        if !already_probed {
-            let probe = probe_url(&self.client, url.as_str()).await?;
-            let mut s = self.state.write().unwrap();
-            s.file_size = probe.resource_size.map(|sz| sz as i64).unwrap_or(-1);
-            s.url = probe.final_uri;
-            s.last_modified = probe.last_modified;
-            s.resumable = false;
-            s.attachment_name = probe.attachment_name;
-            s.content_type = probe.content_type;
-        }
+        // Probe the URL only if state was not pre-populated (e.g. via `from_probe()`).
+        probe_if_needed(&self.state, &self.client).await?;
 
         let temp_dir_path = self.state.read().unwrap().temp_dir.clone();
         tokio::fs::create_dir_all(&temp_dir_path)
@@ -101,11 +88,14 @@ impl DownloadStrategy for OnePartDownloadStrategy {
             .map_err(DownloadError::Disk)?;
 
         log::info!("[one part::preprocess] temp_dir={}", temp_dir_path);
+        self.state.write().unwrap().set_phase(DownloadPhase::Segmenting);
         Ok(())
     }
 
     /// Downloads the entire resource as a single segment into the temp directory.
     async fn download(&self) -> Result<(), DownloadError> {
+        self.state.write().unwrap().set_phase(DownloadPhase::Downloading { progress: None });
+
         let progress_tx = self.progress_tx.lock().unwrap().clone();
 
         let temp_dir = {
@@ -129,15 +119,7 @@ impl DownloadStrategy for OnePartDownloadStrategy {
             &client,
             temp_dir.clone(),
             cancel_token,
-            |bytes_delta| {
-                if let Some(tx) = &progress_tx {
-                    let _ = tx.try_send(Ok(ProgressEvent {
-                        segment_id: segment_id_for_progress.clone(),
-                        bytes_delta,
-                        total_bytes: None,
-                    }));
-                }
-            },
+            make_progress_sender(progress_tx.clone(), segment_id_for_progress, None),
             url.as_str()
         )
         .await;
@@ -149,7 +131,7 @@ impl DownloadStrategy for OnePartDownloadStrategy {
             }
             Err(e) => {
                 if let Some(tx) = &progress_tx {
-                    let _ = tx.try_send(Err(e.to_string()));
+                    let _ = tx.try_send(Err::<ProgressEvent, String>(e.to_string()));
                 }
                 Err(e)
             }
@@ -168,6 +150,8 @@ impl DownloadStrategy for OnePartDownloadStrategy {
 
     /// Moves the single downloaded temp file to the final output path.
     async fn postprocess(&self) -> Result<(), DownloadError> {
+        self.state.write().unwrap().set_phase(DownloadPhase::Assembling);
+
         let segment_id = self
             .downloaded_segment_id
             .lock()

@@ -30,25 +30,45 @@ struct SegmentProgress {
 /// | `Err(String)`          | `on_error(&msg)` then stops     |
 /// | Channel closed (no err)| `on_complete(&final_snapshot)`  |
 pub struct ProgressNotifier {
-    observers: Vec<Box<dyn ProgressObserver>>,
+    /// Observers stored with a stable ID so they can be deregistered.
+    observers: Vec<(usize, Box<dyn ProgressObserver>)>,
+    next_observer_id: usize,
     segments: HashMap<String, SegmentProgress>,
     segment_order: Vec<String>,
     start_time: Instant,
+    /// Incrementally maintained aggregates — avoids O(n) iteration on every event.
+    agg_total_bytes: u64,
+    agg_total_downloaded: u64,
+    agg_combined_speed: f64,
 }
 
 impl ProgressNotifier {
     pub fn new() -> Self {
         Self {
             observers: Vec::new(),
+            next_observer_id: 0,
             segments: HashMap::new(),
             segment_order: Vec::new(),
             start_time: Instant::now(),
+            agg_total_bytes: 0,
+            agg_total_downloaded: 0,
+            agg_combined_speed: 0.0,
         }
     }
 
-    /// Register an observer. Must be called before `run()`.
-    pub fn add_observer(&mut self, observer: Box<dyn ProgressObserver>) {
-        self.observers.push(observer);
+    /// Register an observer and return its ID (use with `remove_observer`).
+    /// Must be called before `run()`.
+    pub fn add_observer(&mut self, observer: Box<dyn ProgressObserver>) -> usize {
+        let id = self.next_observer_id;
+        self.next_observer_id += 1;
+        self.observers.push((id, observer));
+        id
+    }
+
+    /// Unregister an observer by the ID returned from `add_observer`.
+    /// No-op if the ID is not found.
+    pub fn remove_observer(&mut self, id: usize) {
+        self.observers.retain(|(oid, _)| *oid != id);
     }
 
     /// Consume progress messages until the channel closes or an error arrives.
@@ -60,12 +80,12 @@ impl ProgressNotifier {
             match msg {
                 Ok(ev) => {
                     let snapshot = self.handle_event(ev);
-                    for observer in &self.observers {
+                    for (_, observer) in &self.observers {
                         observer.on_progress(&snapshot).await;
                     }
                 }
                 Err(error) => {
-                    for observer in &self.observers {
+                    for (_, observer) in &self.observers {
                         observer.on_error(&error).await;
                     }
                     return;
@@ -91,7 +111,12 @@ impl ProgressNotifier {
                     last_update: now,
                 },
             );
+            // New segment: add its total to the aggregate.
+            self.agg_total_bytes += total;
         }
+
+        // Accumulate downloaded bytes into the aggregate.
+        self.agg_total_downloaded += ev.bytes_delta;
 
         {
             let segment = self.segments.get_mut(&ev.segment_id).unwrap();
@@ -99,6 +124,8 @@ impl ProgressNotifier {
 
             if segment.total_bytes == 0 {
                 if let Some(tb) = ev.total_bytes {
+                    // Segment total was unknown at registration; update aggregate now.
+                    self.agg_total_bytes += tb;
                     segment.total_bytes = tb;
                 }
             }
@@ -106,7 +133,11 @@ impl ProgressNotifier {
             let elapsed = now.duration_since(segment.last_update).as_secs_f64();
             if elapsed > 0.0 {
                 let instant_speed = ev.bytes_delta as f64 / elapsed;
-                segment.speed = EMA_ALPHA * instant_speed + (1.0 - EMA_ALPHA) * segment.speed;
+                let old_speed = segment.speed;
+                let new_speed = EMA_ALPHA * instant_speed + (1.0 - EMA_ALPHA) * old_speed;
+                // Update combined speed incrementally: subtract old, add new.
+                self.agg_combined_speed = (self.agg_combined_speed - old_speed + new_speed).max(0.0);
+                segment.speed = new_speed;
                 segment.last_update = now;
             }
         }
@@ -115,9 +146,11 @@ impl ProgressNotifier {
     }
 
     fn build_snapshot(&self) -> ProgressSnapshot {
-        let total_bytes: u64 = self.segments.values().map(|s| s.total_bytes).sum();
-        let total_downloaded: u64 = self.segments.values().map(|s| s.bytes_downloaded).sum();
-        let combined_speed: f64 = self.segments.values().map(|s| s.speed).sum();
+        // Aggregate totals are O(1) thanks to incremental maintenance.
+        let total_bytes = self.agg_total_bytes;
+        let total_downloaded = self.agg_total_downloaded;
+        let combined_speed = self.agg_combined_speed;
+
         let remaining = total_bytes.saturating_sub(total_downloaded);
         let eta = if combined_speed > 0.0 {
             remaining as f64 / combined_speed
@@ -125,6 +158,7 @@ impl ProgressNotifier {
             0.0
         };
 
+        // Per-segment snapshots are inherently O(n) but represent a small, fixed-size list.
         let segment_snapshots: Vec<SegmentSnapshot> = self
             .segment_order
             .iter()
@@ -158,9 +192,8 @@ impl ProgressNotifier {
 
     async fn finish(&self) {
         let elapsed = self.start_time.elapsed();
-        let total_downloaded: u64 = self.segments.values().map(|s| s.bytes_downloaded).sum();
         let avg_speed = if elapsed.as_secs_f64() > 0.0 {
-            total_downloaded as f64 / elapsed.as_secs_f64()
+            self.agg_total_downloaded as f64 / elapsed.as_secs_f64()
         } else {
             0.0
         };
@@ -170,7 +203,7 @@ impl ProgressNotifier {
         final_snapshot.speed = avg_speed;
         final_snapshot.eta_secs = 0.0;
 
-        for observer in &self.observers {
+        for (_, observer) in &self.observers {
             observer.on_complete(&final_snapshot).await;
         }
     }
