@@ -3,14 +3,14 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 
 use async_trait::async_trait;
-use reqwest::Client;
+use reqwest::{Client};
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::downloader::make_progress_sender;
-use crate::downloader::probe_if_needed;
 use crate::downloader::segment_grabber::download_segment;
+use crate::downloader::segment_grabber::probe_segment;
 use crate::downloader::strategy::download_strategy::DownloadStrategy;
 use crate::types::types::{
     AuthenticationInfo, DownloadError, DownloadPhase, DownloaderState, ProgressEvent, ProbeResult,
@@ -203,7 +203,7 @@ impl MultipartDownloadStrategyBuilder {
 /// Starts with a single segment covering the entire file, then repeatedly
 /// splits the largest segment in half until we reach `max_connections` segments
 /// or every segment is at the minimum size.
-fn create_segments(file_size: u64, max_connections: usize) -> Vec<Segment> {
+async fn create_segments(file_size: u64, max_connections: usize,client: &Client,url: &String) -> Vec<Segment> {
     log::info!(
         "[create_segments] file_size={}, max_connections={}",
         file_size,
@@ -234,23 +234,48 @@ fn create_segments(file_size: u64, max_connections: usize) -> Vec<Segment> {
             );
             break;
         }
-
         let half = segment.length / 2;
         let new_offset = segment.offset + half;
         let new_length = segment.length - half;
+
+
 
         log::debug!(
             "[create_segments] splitting segment[{}]: offset={}, length={} -> half={}, new_offset={}, new_length={}",
             max_idx, segment.offset, segment.length, half, new_offset, new_length
         );
 
-        segments[max_idx].length = half;
+        // Deep-copy current segments so we can revert if any probe fails.
+        let original_segments = segments.clone();
 
+        segments[max_idx].length = half;
         segments.push(Segment::new(
             Uuid::new_v4().to_string(),
             new_offset,
             new_length,
         ));
+
+        // Probe ALL segments concurrently; only commit the split if every probe succeeds.
+        let probe_results = futures::future::join_all(
+            segments.iter().map(|s| probe_segment(client, url, s))
+        ).await;
+
+        let all_ok = probe_results.iter().all(|r| r.is_ok());
+
+        if all_ok {
+            log::debug!(
+                "[create_segments] all {} probes succeeded, committing split",
+                probe_results.len()
+            );
+        } else {
+            let first_err = probe_results.iter().find_map(|r| r.as_ref().err());
+            log::warn!(
+                "[create_segments] probe failed ({:?}), reverting split and stopping",
+                first_err
+            );
+            segments = original_segments;
+            break;
+        }
     }
 
     let total: i64 = segments.iter().map(|s| s.length).sum();
@@ -288,8 +313,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
     }
 
     async fn preprocess(&self) -> Result<(), DownloadError> {
-        // Probe the URL only if state was not pre-populated (e.g. via `from_probe()`).
-        probe_if_needed(&self.state, &self.client).await?;
+
 
         // Metadata is ready; transition to Segmenting.
         self.state.write().unwrap().set_phase(DownloadPhase::Segmenting);
@@ -311,7 +335,12 @@ impl DownloadStrategy for MultipartDownloadStrategy {
                     "[preprocess] resumable=true, file_size={}, creating multipart segments with max_connections={}",
                     file_size, self.connections
                 );
-                create_segments(file_size, self.connections)
+                let client = self.client.clone();
+                let url = {
+                    let s = self.state.read().unwrap();
+                    s.url.clone()
+                };
+                create_segments(file_size, self.connections,&client,&url).await
             } else {
                 log::info!("[preprocess] resumable=true but file_size unknown, using single segment");
                 vec![Segment::new(Uuid::new_v4().to_string(), 0, -1)]

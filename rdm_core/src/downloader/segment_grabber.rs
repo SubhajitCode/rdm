@@ -382,3 +382,25 @@ fn extract_filename_plain(disposition: &str) -> Option<String> {
         Some(raw.to_string())
     }
 }
+
+pub(crate) async fn probe_segment(client: &Client, url: &String, segment: &Segment) -> Result<String, DownloadError> {
+    let mut builder = client.head(url);
+
+    if segment.length > 0 {
+        // probe the exact byte range for this segment
+        let start = segment.offset + segment.downloaded;
+        let end = segment.offset + segment.length - 1;
+        builder = builder.header("Range", format!("bytes={}-{}", start, end));
+    }
+
+    let response = builder.send().await?;
+    // ensure 2xx; convert reqwest::Error into DownloadError via From
+    if !response.status().is_success() {
+        return Err(DownloadError::SegmentFailed("Probe request failed with status: ".to_string() + &response.status().to_string()));
+    }
+    log::info!(
+        "[probe_segment] segment={}: probe response status={},offset={}, length={}",
+        segment.id, response.status(),segment.offset , segment.length
+    );
+    Ok(response.status().to_string())
+}
