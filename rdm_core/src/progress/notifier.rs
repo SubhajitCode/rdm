@@ -17,24 +17,23 @@ struct SegmentProgress {
 /// aggregates byte counts into `ProgressSnapshot`s, and fans out to all
 /// registered observers.
 ///
-/// Speed and ETA are intentionally **not** computed here — they depend on
-/// wall-clock time and belong in the observer layer (e.g. `SseProgressObserver`),
-/// which has a stable, low-frequency view of progress suited for rate measurement.
+/// This type is intentionally pure byte-accounting: it has no notion of time,
+/// speed, or ETA. Those are wall-clock concerns and belong in the observer
+/// layer (e.g. `SseProgressObserver`), which has a stable, low-frequency view
+/// of progress that is well-suited to rate measurement.
 ///
 /// # Lifecycle
 ///
-/// | Channel message        | Observer method called          |
-/// |------------------------|---------------------------------|
-/// | `Ok(ProgressEvent)`    | `on_progress(&snapshot)`        |
-/// | `Err(String)`          | `on_error(&msg)` then stops     |
-/// | Channel closed (no err)| `on_complete(&final_snapshot)`  |
+/// | Channel message        | Observer method called         |
+/// |------------------------|--------------------------------|
+/// | `Ok(ProgressEvent)`    | `on_progress(&snapshot)`       |
+/// | `Err(String)`          | `on_error(&msg)` then stops    |
+/// | Channel closed (no err)| `on_complete(&final_snapshot)` |
 pub struct ProgressNotifier {
-    /// Observers stored with a stable ID so they can be deregistered.
     observers: Vec<(usize, Box<dyn ProgressObserver>)>,
     next_observer_id: usize,
     segments: HashMap<String, SegmentProgress>,
     segment_order: Vec<String>,
-    /// Incrementally maintained aggregates — avoids O(n) iteration on every event.
     agg_total_bytes: u64,
     agg_total_downloaded: u64,
 }
@@ -51,8 +50,6 @@ impl ProgressNotifier {
         }
     }
 
-    /// Register an observer and return its ID (use with `remove_observer`).
-    /// Must be called before `run()`.
     pub fn add_observer(&mut self, observer: Box<dyn ProgressObserver>) -> usize {
         let id = self.next_observer_id;
         self.next_observer_id += 1;
@@ -60,13 +57,10 @@ impl ProgressNotifier {
         id
     }
 
-    /// Unregister an observer by the ID returned from `add_observer`.
-    /// No-op if the ID is not found.
     pub fn remove_observer(&mut self, id: usize) {
         self.observers.retain(|(oid, _)| *oid != id);
     }
 
-    /// Consume progress messages until the channel closes or an error arrives.
     pub async fn run(
         &mut self,
         mut progress_rx: mpsc::Receiver<Result<ProgressEvent, String>>,
@@ -114,7 +108,6 @@ impl ProgressNotifier {
 
             if segment.total_bytes == 0 {
                 if let Some(tb) = ev.total_bytes {
-                    // Segment total was unknown at registration; update aggregate now.
                     self.agg_total_bytes += tb;
                     segment.total_bytes = tb;
                 }
@@ -125,7 +118,7 @@ impl ProgressNotifier {
     }
 
     fn build_snapshot(&self) -> ProgressSnapshot {
-        let segment_snapshots: Vec<SegmentSnapshot> = self
+        let segments = self
             .segment_order
             .iter()
             .filter_map(|id| self.segments.get(id))
@@ -134,28 +127,22 @@ impl ProgressNotifier {
                 offset: s.offset,
                 bytes_downloaded: s.bytes_downloaded,
                 total_bytes: s.total_bytes,
-                // Speed and ETA are filled in by the observer layer.
-                speed: 0.0,
-                eta_secs: 0.0,
             })
             .collect();
 
         ProgressSnapshot {
-            segments: segment_snapshots,
+            segments,
             total_bytes_downloaded: self.agg_total_downloaded,
             total_bytes: self.agg_total_bytes,
-            // Speed and ETA are filled in by the observer layer.
-            speed: 0.0,
-            eta_secs: 0.0,
             done: false,
         }
     }
 
     async fn finish(&self) {
-        let mut final_snapshot = self.build_snapshot();
-        final_snapshot.done = true;
+        let mut snap = self.build_snapshot();
+        snap.done = true;
         for (_, observer) in &self.observers {
-            observer.on_complete(&final_snapshot).await;
+            observer.on_complete(&snap).await;
         }
     }
 }

@@ -1,6 +1,8 @@
 use serde::Serialize;
 
-/// Per-segment progress snapshot.
+/// Per-segment progress snapshot — pure byte accounting, no speed/ETA.
+/// Speed and ETA are computed by the observer layer (e.g. `SseProgressObserver`)
+/// and travel on the wire in the enriched type, not here.
 #[derive(Debug, Clone, Serialize)]
 pub struct SegmentSnapshot {
     pub segment_id: String,
@@ -8,18 +10,15 @@ pub struct SegmentSnapshot {
     pub offset: u64,
     pub bytes_downloaded: u64,
     pub total_bytes: u64,
-    pub speed: f64,
-    pub eta_secs: f64,
 }
 
-/// Aggregate progress snapshot for an entire download.
+/// Aggregate progress snapshot — pure byte accounting, no speed/ETA.
+/// Speed and ETA are computed by the observer layer (e.g. `SseProgressObserver`).
 #[derive(Debug, Clone, Serialize)]
 pub struct ProgressSnapshot {
     pub segments: Vec<SegmentSnapshot>,
     pub total_bytes_downloaded: u64,
     pub total_bytes: u64,
-    pub speed: f64,
-    pub eta_secs: f64,
     pub done: bool,
 }
 
@@ -29,8 +28,6 @@ impl ProgressSnapshot {
             segments: Vec::new(),
             total_bytes_downloaded: 0,
             total_bytes: 0,
-            speed: 0.0,
-            eta_secs: 0.0,
             done: false,
         }
     }

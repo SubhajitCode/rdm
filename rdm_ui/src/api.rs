@@ -53,6 +53,10 @@ pub struct SegmentSnapshot {
     pub offset: u64,
     pub bytes_downloaded: u64,
     pub total_bytes: u64,
+    /// Bytes/sec for this segment over the observer's sliding window.
+    pub speed: f64,
+    /// Estimated seconds until this segment completes.
+    pub eta_secs: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,7 +65,9 @@ pub struct ProgressSnapshot {
     pub segments: Vec<SegmentSnapshot>,
     pub total_bytes_downloaded: u64,
     pub total_bytes: u64,
+    /// Aggregate bytes/sec over the observer's sliding window.
     pub speed: f64,
+    /// Estimated seconds until the whole download completes.
     pub eta_secs: f64,
     pub done: bool,
 }

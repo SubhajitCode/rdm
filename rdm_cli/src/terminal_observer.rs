@@ -87,9 +87,8 @@ impl TerminalProgressObserver {
         }
 
         if let Some(pb) = total_bar.as_ref() {
-            let speed = format_bytes(snapshot.speed as u64);
             let total = format_bytes(snapshot.total_bytes_downloaded);
-            pb.finish_with_message(format!("Complete — {} at {}/s", total, speed));
+            pb.finish_with_message(format!("Complete — {}", total));
         }
     }
 }

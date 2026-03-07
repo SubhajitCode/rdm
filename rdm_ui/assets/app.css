@@ -307,13 +307,14 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .seg-bar-fill--green { background: #a6e3a1; }
 
-.seg-pct {
+.seg-speed {
   font-size: 10px;
   color: #6c7086;
   font-family: 'SF Mono', 'Fira Code', monospace;
-  width: 30px;
+  min-width: 72px;
   flex-shrink: 0;
   text-align: right;
+  white-space: nowrap;
 }
 
 /* ── Progress: stat cards ────────────────────────────────────────────────── */

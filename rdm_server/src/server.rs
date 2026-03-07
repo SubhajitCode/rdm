@@ -15,9 +15,8 @@ use tokio::sync::{watch, Mutex as TokioMutex, RwLock};
 use tower_http::cors::{Any, CorsLayer};
 
 use rdm_core::downloader::http_downloader::HttpDownloader;
-use rdm_core::progress::snapshot::ProgressSnapshot;
 use crate::path_sanitizer::safe_output_path;
-use crate::sse_observer::SseProgressObserver;
+use crate::sse_observer::{EnrichedSnapshot, SseProgressObserver};
 use crate::types::{
     DownloadRequest, DownloadResponse, MediaData, SyncConfig, TabUpdateData,
     VideoListItem, VidRequest,
@@ -42,8 +41,8 @@ pub struct ActiveDownload {
     /// and must be awaited — `tokio::sync::Mutex` is `Send` across `.await`.
     pub downloader:  Arc<TokioMutex<HttpDownloader>>,
     pub status:      DownloadStatus,
-    /// Receiver for the latest `ProgressSnapshot`; clone to subscribe from SSE handlers.
-    pub progress_rx: watch::Receiver<ProgressSnapshot>,
+    /// Receiver for the latest `EnrichedSnapshot`; clone to subscribe from SSE handlers.
+    pub progress_rx: watch::Receiver<EnrichedSnapshot>,
 }
 
 pub struct AppState {
@@ -481,7 +480,7 @@ async fn cancel_handler(
 /// GET /progress/:id — Server-Sent Events stream of download progress.
 ///
 /// Waits for each change on the `watch` channel (true push) and emits it as
-/// a JSON `ProgressSnapshot` event.  Closes the stream once `done == true`.
+/// a JSON `EnrichedSnapshot` event.  Closes the stream once `done == true`.
 async fn progress_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

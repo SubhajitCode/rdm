@@ -168,7 +168,7 @@ fn ProgressView(download_id: String, title: String) -> Element {
         eta_secs: 0.0,
         done: false,
     });
-    let mut error_msg    = use_signal(|| String::new());
+    let mut error_msg     = use_signal(|| String::new());
     let mut show_segments = use_signal(|| false);
 
     let id_for_sse = download_id.clone();
@@ -398,7 +398,7 @@ fn format_speed(bps: f64) -> String {
     }
 }
 
-/// Render a single segment progress row (label + mini bar).
+/// Render a single segment progress row (label + mini bar + speed).
 fn segment_bar(seg: &SegmentSnapshot) -> Element {
     const MB: f64 = 1024.0 * 1024.0;
 
@@ -417,6 +417,7 @@ fn segment_bar(seg: &SegmentSnapshot) -> Element {
     };
     let fill_width = format!("{:.2}%", pct);
     let is_done    = seg.bytes_downloaded >= seg.total_bytes && seg.total_bytes > 0;
+    let speed_str  = if is_done { "—".to_string() } else { format_speed(seg.speed) };
 
     rsx! {
         div { class: "seg-row",
@@ -427,7 +428,7 @@ fn segment_bar(seg: &SegmentSnapshot) -> Element {
                     style: "width: {fill_width};",
                 }
             }
-            span { class: "seg-pct", "{pct:.0}%" }
+            span { class: "seg-speed", "{speed_str}" }
         }
     }
 }
