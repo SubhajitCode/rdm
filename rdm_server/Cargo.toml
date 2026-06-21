@@ -21,3 +21,4 @@ async-stream   = "0.3"
 futures        = "0.3"
 async-trait    = "0.1.89"
 clap = { version = "4.5.60", features = ["derive"] }
+rusqlite = { version = "0.32.1", features = ["bundled"] }

@@ -1,3 +1,4 @@
+pub mod db;
 pub mod path_sanitizer;
 pub mod server;
 pub mod sse_observer;

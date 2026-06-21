@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::downloader::make_progress_sender;
+use crate::downloader::probe_if_needed;
 use crate::downloader::segment_grabber::download_segment;
 use crate::downloader::segment_grabber::probe_segment;
 use crate::downloader::strategy::download_strategy::DownloadStrategy;
@@ -74,6 +75,22 @@ impl MultipartDownloadStrategy {
         Self::from_state(state, connections)
     }
 
+    pub fn from_persisted(state: DownloaderState, segments: Vec<Segment>, connections: usize) -> Self {
+        let client = state.create_client();
+        let mut segment_map = HashMap::new();
+        for segment in segments {
+            segment_map.insert(segment.id.clone(), segment);
+        }
+        Self {
+            state: Arc::new(StdRwLock::new(state)),
+            segments: Arc::new(RwLock::new(segment_map)),
+            client: Arc::new(client),
+            cancel_token: CancellationToken::new(),
+            progress_tx: StdMutex::new(None),
+            connections,
+        }
+    }
+
     pub async fn temp_dir(&self) -> String {
         self.state.read().unwrap().temp_dir.clone()
     }
@@ -88,6 +105,28 @@ impl MultipartDownloadStrategy {
 
     pub fn cancel_token(&self) -> &CancellationToken {
         &self.cancel_token
+    }
+
+    async fn recover_existing_segments(&self, temp_dir_path: &str) {
+        let temp_dir = PathBuf::from(temp_dir_path);
+        let mut segments = self.segments.write().await;
+        for segment in segments.values_mut() {
+            let restored = std::fs::metadata(temp_dir.join(&segment.id))
+                .ok()
+                .map(|meta| meta.len() as i64)
+                .unwrap_or(0);
+            let capped = if segment.length > 0 {
+                restored.clamp(0, segment.length)
+            } else {
+                restored.max(0)
+            };
+            segment.downloaded = capped;
+            segment.state = if segment.length > 0 && capped >= segment.length {
+                SegmentState::Finished
+            } else {
+                SegmentState::NotStarted
+            };
+        }
     }
 }
 
@@ -313,7 +352,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
     }
 
     async fn preprocess(&self) -> Result<(), DownloadError> {
-
+        probe_if_needed(&self.state, &self.client).await?;
 
         // Metadata is ready; transition to Segmenting.
         self.state.write().unwrap().set_phase(DownloadPhase::Segmenting);
@@ -328,6 +367,11 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         tokio::fs::create_dir_all(&temp_dir_path)
             .await
             .map_err(DownloadError::Disk)?;
+
+        if !self.segments.read().await.is_empty() {
+            self.recover_existing_segments(&temp_dir_path).await;
+            return Ok(());
+        }
 
         let new_segments = if resumable {
             if let Some(file_size) = resource_size {
@@ -385,7 +429,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
             let segments_guard = self.segments.read().await;
             segments_guard
                 .values()
-                .filter(|s| s.state == SegmentState::NotStarted)
+                .filter(|s| s.state != SegmentState::Finished && (s.length < 0 || s.downloaded < s.length))
                 .cloned()
                 .collect()
         };
@@ -567,5 +611,13 @@ impl DownloadStrategy for MultipartDownloadStrategy {
         .map_err(DownloadError::Disk)?;
         self.clear_progress_tx();
         Ok(())
+    }
+
+    fn current_state(&self) -> DownloaderState {
+        self.state.read().unwrap().clone()
+    }
+
+    async fn current_segments(&self) -> Vec<Segment> {
+        self.segments.read().await.values().cloned().collect()
     }
 }

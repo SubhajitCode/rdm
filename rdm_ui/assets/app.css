@@ -180,11 +180,27 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   padding: 8px 24px;
 }
 
+.btn--danger-lite {
+  background: rgba(243, 139, 168, 0.12);
+  color: #f38ba8;
+  border: 1px solid rgba(243, 139, 168, 0.35);
+  font-weight: 600;
+  padding: 8px 18px;
+}
+
 .btn--success {
   background: #a6e3a1;
   color: #1e1e2e;
   font-weight: 600;
   padding: 8px 24px;
+}
+
+.btn--ghost {
+  background: transparent;
+  color: #89b4fa;
+  border: 1px solid rgba(137, 180, 250, 0.35);
+  font-weight: 600;
+  padding: 8px 18px;
 }
 
 /* ── Error banner ───────────────────────────────────────────────────────── */
@@ -346,4 +362,250 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   font-size: 14px;
   font-weight: 600;
   color: #cdd6f4;
+}
+
+/* ── Dashboard ─────────────────────────────────────────────────────────────── */
+.dashboard {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 24px;
+  gap: 16px;
+}
+
+.dashboard-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-shrink: 0;
+}
+
+.dashboard-toolbar {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.dashboard-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: #cdd6f4;
+}
+
+.dashboard-subtitle {
+  margin-top: 4px;
+  font-size: 13px;
+  color: #7f849c;
+}
+
+.dashboard-error {
+  margin-bottom: 0;
+}
+
+.download-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-right: 4px;
+}
+
+.download-card {
+  background: #181825;
+  border: 1px solid #313244;
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.download-card__top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.download-card__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+}
+
+.download-card__meta {
+  min-width: 0;
+}
+
+.download-card__title {
+  font-size: 15px;
+  font-weight: 650;
+  color: #cdd6f4;
+}
+
+.download-card__path,
+.download-card__url {
+  font-size: 12px;
+  color: #7f849c;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.download-card__url {
+  color: #6c7086;
+}
+
+.download-card__bar {
+  height: 8px;
+}
+
+.download-card__stats {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.download-card__stat {
+  font-size: 12px;
+  color: #bac2de;
+}
+
+.download-card__error {
+  font-size: 12px;
+  color: #f38ba8;
+}
+
+.download-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.card-checkbox,
+.bulk-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #cdd6f4;
+}
+
+.card-checkbox input,
+.bulk-checkbox input {
+  width: 16px;
+  height: 16px;
+  accent-color: #89b4fa;
+}
+
+.bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  background: #181825;
+  border: 1px solid #313244;
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+
+.bulk-count {
+  font-size: 13px;
+  color: #bac2de;
+}
+
+.bulk-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+
+.status-pill {
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+.status-pill--queued {
+  background: rgba(250, 179, 135, 0.15);
+  color: #fab387;
+}
+
+.status-pill--running {
+  background: rgba(137, 180, 250, 0.15);
+  color: #89b4fa;
+}
+
+.status-pill--stopped {
+  background: rgba(203, 166, 247, 0.15);
+  color: #cba6f7;
+}
+
+.status-pill--completed {
+  background: rgba(166, 227, 161, 0.15);
+  color: #a6e3a1;
+}
+
+.status-pill--failed,
+.status-pill--interrupted {
+  background: rgba(243, 139, 168, 0.15);
+  color: #f38ba8;
+}
+
+.empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed #45475a;
+  border-radius: 14px;
+  color: #7f849c;
+  text-align: center;
+  padding: 32px;
+}
+
+.empty-state__title {
+  font-size: 16px;
+  font-weight: 650;
+  color: #cdd6f4;
+}
+
+.empty-state__subtitle {
+  margin-top: 8px;
+  font-size: 13px;
+  max-width: 420px;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(17, 17, 27, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 20;
+}
+
+.modal-card {
+  width: min(760px, 100%);
+  background: #1e1e2e;
+  border: 1px solid #313244;
+  border-radius: 16px;
+  padding: 20px 24px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+}
+
+.path-input--wide {
+  width: 100%;
 }

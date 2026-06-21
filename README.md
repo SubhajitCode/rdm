@@ -9,7 +9,7 @@ The project is structured as a Cargo workspace with four crates and companion br
 | `rdm_core` | — | Core download engine (library) |
 | `rdm_cli` | `rdm` | Command-line download tool |
 | `rdm_server` | `rdmd` | Local HTTP daemon for browser extension integration |
-| `rdm_ui` | `rdm_ui` | Dioxus desktop UI (save dialog + progress view) |
+| `rdm_ui` | `rdm_ui` | Dioxus desktop UI (dashboard + save dialog + progress view) |
 | `rdm-chrome-extension` | — | Chrome/Chromium MV3 browser extension |
 | `rdm-firefox-extension` | — | Firefox MV3 browser extension |
 
@@ -24,6 +24,7 @@ The project is structured as a Cargo workspace with four crates and companion br
 - **Retry with backoff** — automatically retries failed segments with exponential backoff (up to 3 retries: 100 ms → 200 ms → 400 ms)
 - **Cancellation support** — cooperative cancellation via `CancellationToken`
 - **Real-time progress** — EMA-smoothed speed, per-segment and aggregate progress with bytes downloaded, speed, and ETA
+- **Persistent download dashboard** — SQLite-backed download history with stop, resume, delete-entry, and delete-entry-plus-files actions
 - **Browser extension integration** — the `rdmd` daemon receives media and download events from the browser extension, spawns the `rdm_ui` desktop window for save-location selection, and streams back real-time progress via Server-Sent Events (SSE)
 - **Streaming media detection** — the browser extension monitors `webRequest` traffic and posts detected audio/video URLs to `rdmd`
 - **Download interception** — the extension cancels browser-native downloads for configured file types and hands them off to `rdmd`
@@ -117,6 +118,12 @@ rdmd --host 127.0.0.1 --port 8597 --connections 8
 |--------|------|-------------|
 | `GET` | `/sync` | Heartbeat — returns server config to the extension |
 | `POST` | `/download` | Start a download (called by `rdm_ui` after save-location is chosen) |
+| `GET` | `/downloads` | List persisted downloads for the desktop dashboard |
+| `GET` | `/downloads/{id}` | Get a single persisted download summary |
+| `POST` | `/downloads/{id}/stop` | Stop a running download and keep resumable temp data |
+| `POST` | `/downloads/{id}/resume` | Resume a stopped or interrupted download |
+| `DELETE` | `/downloads/{id}` | Delete only the dashboard/history entry |
+| `DELETE` | `/downloads/{id}/files` | Delete the history entry and local download data |
 | `POST` | `/media` | Report a detected media URL |
 | `POST` | `/vid` | User clicked a video in the popup — spawns `rdm_ui` |
 | `POST` | `/tab-update` | Report a tab navigation event |
@@ -130,7 +137,10 @@ rdmd --host 127.0.0.1 --port 8597 --connections 8
 
 ## Desktop UI (`rdm_ui`)
 
-`rdm_ui` is a Dioxus desktop window spawned by `rdmd` when the user clicks a detected video in the browser extension popup. It is **not** launched directly by the user.
+`rdm_ui` now serves two roles:
+
+- launched directly, it opens the persistent download dashboard
+- spawned by `rdmd`, it opens the save dialog and per-download progress window for browser-triggered downloads
 
 ### Flow
 
@@ -143,6 +153,16 @@ Browser extension popup
           → View 2: real-time progress bar via GET /progress/{id} SSE
             → Download complete → Close
 ```
+
+### Dashboard mode
+
+Run the binary directly to open the desktop dashboard:
+
+```bash
+./target/debug/rdm_ui
+```
+
+The dashboard reads persisted downloads from `rdmd`, shows current status/progress, and exposes **Stop**, **Resume**, **Delete Entry**, and **Delete Files** actions.
 
 ### Testing in isolation
 

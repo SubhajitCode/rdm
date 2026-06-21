@@ -47,15 +47,45 @@ pub struct DownloadResponse {
     pub status: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadStatus {
+    Queued,
+    Running,
+    Stopped,
+    Completed,
+    Failed,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DownloadSummary {
+    pub id: String,
+    pub title: String,
+    pub url: String,
+    pub output_path: String,
+    pub info: String,
+    pub status: DownloadStatus,
+    pub total_bytes_downloaded: u64,
+    pub total_bytes: u64,
+    pub speed: f64,
+    pub eta_secs: f64,
+    pub last_error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub file_exists: bool,
+    pub temp_exists: bool,
+    pub can_resume: bool,
+    pub is_active: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SegmentSnapshot {
     pub segment_id: String,
     pub offset: u64,
     pub bytes_downloaded: u64,
     pub total_bytes: u64,
-    /// Bytes/sec for this segment over the observer's sliding window.
     pub speed: f64,
-    /// Estimated seconds until this segment completes.
     pub eta_secs: f64,
 }
 
@@ -65,9 +95,7 @@ pub struct ProgressSnapshot {
     pub segments: Vec<SegmentSnapshot>,
     pub total_bytes_downloaded: u64,
     pub total_bytes: u64,
-    /// Aggregate bytes/sec over the observer's sliding window.
     pub speed: f64,
-    /// Estimated seconds until the whole download completes.
     pub eta_secs: f64,
     pub done: bool,
 }
@@ -87,19 +115,49 @@ pub async fn trigger_download(req: &DownloadRequest) -> Result<DownloadResponse,
         return Err(format!("Server returned status {}", resp.status()));
     }
 
-    resp.json::<DownloadResponse>()
+    let body = resp
+        .json::<DownloadResponse>()
         .await
-        .map_err(|e| format!("Parse error: {}", e))
+        .map_err(|e| format!("Parse error: {}", e))?;
+
+    if body.status.starts_with("error:") {
+        return Err(body.status.clone());
+    }
+
+    Ok(body)
 }
 
-pub async fn cancel_download(id: &str) -> Result<(), String> {
+pub async fn stop_download(id: &str) -> Result<(), String> {
+    simple_post(format!("{}/downloads/{}/stop", SERVER_BASE, id)).await
+}
+
+pub async fn resume_download(id: &str) -> Result<(), String> {
+    simple_post(format!("{}/downloads/{}/resume", SERVER_BASE, id)).await
+}
+
+pub async fn delete_download_entry(id: &str) -> Result<(), String> {
+    simple_delete(format!("{}/downloads/{}", SERVER_BASE, id)).await
+}
+
+pub async fn delete_download_with_files(id: &str) -> Result<(), String> {
+    simple_delete(format!("{}/downloads/{}/files", SERVER_BASE, id)).await
+}
+
+pub async fn list_downloads() -> Result<Vec<DownloadSummary>, String> {
     let client = reqwest::Client::new();
-    client
-        .post(format!("{}/cancel/{}", SERVER_BASE, id))
+    let resp = client
+        .get(format!("{}/downloads", SERVER_BASE))
         .send()
         .await
         .map_err(|e| format!("HTTP error: {}", e))?;
-    Ok(())
+
+    if !resp.status().is_success() {
+        return Err(format!("Server returned status {}", resp.status()));
+    }
+
+    resp.json::<Vec<DownloadSummary>>()
+        .await
+        .map_err(|e| format!("Parse error: {}", e))
 }
 
 pub async fn subscribe_progress<F>(id: &str, mut on_snapshot: F) -> Result<(), String>
@@ -142,5 +200,31 @@ where
         }
     }
 
+    Ok(())
+}
+
+async fn simple_post(url: String) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(url)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Server returned status {}", resp.status()));
+    }
+    Ok(())
+}
+
+async fn simple_delete(url: String) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .delete(url)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Server returned status {}", resp.status()));
+    }
     Ok(())
 }

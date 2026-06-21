@@ -204,4 +204,12 @@ impl DownloadStrategy for OnePartDownloadStrategy {
 
         Ok(())
     }
+
+    fn current_state(&self) -> DownloaderState {
+        self.state.read().unwrap().clone()
+    }
+
+    async fn current_segments(&self) -> Vec<Segment> {
+        Vec::new()
+    }
 }

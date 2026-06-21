@@ -60,6 +60,63 @@ pub struct DownloadResponse {
     pub status: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadStatus {
+    Queued,
+    Running,
+    Stopped,
+    Completed,
+    Failed,
+    Interrupted,
+}
+
+impl DownloadStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DownloadStatus::Queued => "queued",
+            DownloadStatus::Running => "running",
+            DownloadStatus::Stopped => "stopped",
+            DownloadStatus::Completed => "completed",
+            DownloadStatus::Failed => "failed",
+            DownloadStatus::Interrupted => "interrupted",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "queued" => Some(Self::Queued),
+            "running" => Some(Self::Running),
+            "stopped" => Some(Self::Stopped),
+            "completed" => Some(Self::Completed),
+            "failed" => Some(Self::Failed),
+            "interrupted" => Some(Self::Interrupted),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadSummary {
+    pub id: String,
+    pub title: String,
+    pub url: String,
+    pub output_path: String,
+    pub info: String,
+    pub status: DownloadStatus,
+    pub total_bytes_downloaded: u64,
+    pub total_bytes: u64,
+    pub speed: f64,
+    pub eta_secs: f64,
+    pub last_error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub file_exists: bool,
+    pub temp_exists: bool,
+    pub can_resume: bool,
+    pub is_active: bool,
+}
+
 /// Payload POSTed by the extension on /media (detected streaming media).
 #[derive(Debug, Deserialize)]
 pub struct MediaData {

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
-use crate::types::types::{DownloadError, DownloaderState, ProgressEvent, ProbeResult};
+use crate::types::types::{DownloadError, DownloaderState, ProgressEvent, ProbeResult, Segment};
 
 #[async_trait]
 pub trait DownloadStrategy: Send + Sync {
@@ -19,6 +19,8 @@ pub trait DownloadStrategy: Send + Sync {
     async fn pause(&self) -> Result<(), DownloadError>;
     async fn stop(&self) -> Result<(), DownloadError>;
     async fn postprocess(&self) -> Result<(), DownloadError>;
+    fn current_state(&self) -> DownloaderState;
+    async fn current_segments(&self) -> Vec<Segment>;
 }
 
 /// Factory that selects and constructs the appropriate `DownloadStrategy`
