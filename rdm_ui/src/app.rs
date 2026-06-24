@@ -710,7 +710,6 @@ fn ext_from_url(url: &str) -> Option<&'static str> {
             "flac" => Some("flac"),
             "wav" => Some("wav"),
             "m4v" => Some("m4v"),
-            "m3u8" => Some("m3u8"),
             _ => None,
         }
     } else {

@@ -52,6 +52,7 @@ impl OnePartDownloadStrategy {
         state.resumable = false;
         state.attachment_name = probe.attachment_name;
         state.content_type = probe.content_type;
+        state.download_kind = probe.download_kind;
         Self::from_state(state)
     }
 }
@@ -176,6 +177,7 @@ impl DownloadStrategy for OnePartDownloadStrategy {
 
             (s.temp_dir.clone(), output_file)
         };
+        self.state.write().unwrap().output_path = Some(output_file.clone());
 
         let segment_path = PathBuf::from(&temp_dir).join(&segment_id);
 

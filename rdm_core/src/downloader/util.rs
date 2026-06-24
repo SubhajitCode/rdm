@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::types::types::DownloadKind;
+
 // ---------------------------------------------------------------------------
 // Extension helpers (shared by both download strategies)
 // ---------------------------------------------------------------------------
@@ -35,6 +37,9 @@ pub fn ext_from_mime(content_type: Option<&str>) -> Option<String> {
     let mime = content_type?.split(';').next()?.trim().to_lowercase();
 
     let ext = match mime.as_str() {
+        "application/vnd.apple.mpegurl" | "application/x-mpegurl" => "m3u8",
+        "application/dash+xml" => "mpd",
+        "video/mp2t" => "ts",
         "video/mp4" | "video/x-m4v" => "mp4",
         "video/x-matroska" => "mkv",
         "video/webm" => "webm",
@@ -66,4 +71,30 @@ pub fn ext_from_mime(content_type: Option<&str>) -> Option<String> {
         _ => return None,
     };
     Some(ext.to_string())
+}
+
+pub fn detect_download_kind(url: &str, content_type: Option<&str>) -> DownloadKind {
+    let path = url.split('?').next().unwrap_or(url).to_ascii_lowercase();
+    if path.ends_with(".m3u8") {
+        return DownloadKind::Hls;
+    }
+    if path.ends_with(".mpd") {
+        return DownloadKind::Dash;
+    }
+
+    let mime = content_type
+        .and_then(|value| value.split(';').next())
+        .map(|value| value.trim().to_ascii_lowercase());
+
+    match mime.as_deref() {
+        Some("application/vnd.apple.mpegurl" | "application/x-mpegurl") => DownloadKind::Hls,
+        Some("application/dash+xml") => DownloadKind::Dash,
+        _ => DownloadKind::Direct,
+    }
+}
+
+pub fn replace_extension(path: &str, ext: &str) -> String {
+    let mut pb = PathBuf::from(path);
+    pb.set_extension(ext);
+    pb.to_string_lossy().to_string()
 }

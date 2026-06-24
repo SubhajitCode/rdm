@@ -72,6 +72,7 @@ impl MultipartDownloadStrategy {
         state.resumable = probe.resumable;
         state.attachment_name = probe.attachment_name;
         state.content_type = probe.content_type;
+        state.download_kind = probe.download_kind;
         Self::from_state(state, connections)
     }
 
@@ -567,6 +568,7 @@ impl DownloadStrategy for MultipartDownloadStrategy {
 
             (segment_ids, temp_dir, output_file)
         };
+        self.state.write().unwrap().output_path = Some(output_file.clone());
 
         tokio::task::spawn_blocking(move || {
             use std::fs::File;

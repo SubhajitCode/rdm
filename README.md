@@ -27,6 +27,7 @@ The project is structured as a Cargo workspace with four crates and companion br
 - **Persistent download dashboard** — SQLite-backed download history with stop, resume, delete-entry, and delete-entry-plus-files actions
 - **Browser extension integration** — the `rdmd` daemon receives media and download events from the browser extension, spawns the `rdm_ui` desktop window for save-location selection, and streams back real-time progress via Server-Sent Events (SSE)
 - **Streaming media detection** — the browser extension monitors `webRequest` traffic and posts detected audio/video URLs to `rdmd`
+- **Streaming manifest downloads** — HLS (`.m3u8`) and DASH (`.mpd`) VOD manifests are routed through a dedicated streaming downloader instead of the byte-range file path
 - **Download interception** — the extension cancels browser-native downloads for configured file types and hands them off to `rdmd`
 
 ---
@@ -217,6 +218,13 @@ The browser extensions intercept downloads and detected media and hand them off 
 - Streams real-time download progress in the extension popup via SSE
 - Provides a **"Download with rdm"** right-click context menu item
 - Keeps a live list of detected streaming media for manual triggering
+
+### Streaming support notes
+
+- HLS (`.m3u8`) and DASH (`.mpd`) are downloaded through a separate streaming engine in `rdm_core`
+- Current support targets **VOD/static manifests**
+- HLS AES-128 segment encryption is supported
+- Live streams, DRM-protected manifests, and DASH manifests that require separate audio/video muxing are not supported yet
 
 > **Note:** `rdmd` must be running before the extension can intercept any downloads.
 

@@ -66,6 +66,7 @@ pub(crate) async fn probe_if_needed(
         s.attachment_name = probe.attachment_name.clone();
         s.content_type = probe.content_type.clone();
         s.last_modified = probe.last_modified.clone();
+        s.download_kind = probe.download_kind;
     }
 
     Ok(Some(probe))

@@ -48,6 +48,15 @@ pub enum StreamType {
     Secondary,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadKind {
+    #[default]
+    Direct,
+    Hls,
+    Dash,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Segment {
     pub id: String,
@@ -80,6 +89,7 @@ pub struct ProbeResult {
     pub content_type: Option<String>,
     pub last_modified: Option<String>,
     pub max_connections: usize,
+    pub download_kind: DownloadKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +131,8 @@ pub struct DownloaderState {
     pub resumable: bool,
     pub attachment_name: Option<String>,
     pub content_type: Option<String>,
+    #[serde(default)]
+    pub download_kind: DownloadKind,
     /// Current phase in the download lifecycle. Starts at `Probing`.
     pub phase: DownloadPhase,
 }
@@ -213,6 +225,7 @@ impl DownloaderState {
             resumable: false,
             attachment_name: None,
             content_type: None,
+            download_kind: DownloadKind::Direct,
             phase: DownloadPhase::Probing,
         }
     }

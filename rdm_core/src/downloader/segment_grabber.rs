@@ -5,6 +5,7 @@ use reqwest::Client;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
+use crate::downloader::util::detect_download_kind;
 use crate::types::types::{DownloadError, ProbeResult, Segment, SegmentState};
 
 /// Returns the exponential backoff delay in milliseconds for a given retry attempt.
@@ -57,6 +58,13 @@ pub async fn probe_url(
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string()),
         max_connections: 0,
+        download_kind: detect_download_kind(
+            response.url().as_str(),
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+        ),
     };
 
     drop(response);

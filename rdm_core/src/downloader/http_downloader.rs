@@ -6,9 +6,10 @@ use crate::downloader::segment_grabber::{probe_url};
 use crate::downloader::strategy::download_strategy::{DownloadStrategy, DownloadStrategyFactory};
 use crate::downloader::strategy::multipart_download_strategy::MultipartDownloadStrategy;
 use crate::downloader::strategy::onepart_download_strategy::OnePartDownloadStrategy;
+use crate::downloader::strategy::streaming_download_strategy::StreamingDownloadStrategy;
 use crate::progress::notifier::ProgressNotifier;
 use crate::progress::observer::ProgressObserver;
-use crate::types::types::{DownloadError, DownloadPhase, DownloaderState, ProbeResult, Segment};
+use crate::types::types::{DownloadError, DownloadKind, DownloadPhase, DownloaderState, ProbeResult, Segment};
 
 /// Default strategy factory: selects `MultipartDownloadStrategy` for resumable
 /// downloads and `OnePartDownloadStrategy` for non-resumable ones.
@@ -24,10 +25,14 @@ impl DownloadStrategyFactory for DefaultStrategyFactory {
         probe: ProbeResult,
         connections: usize,
     ) -> Arc<dyn DownloadStrategy> {
-        if probe.resumable {
+        match probe.download_kind {
+            DownloadKind::Hls | DownloadKind::Dash => {
+                Arc::new(StreamingDownloadStrategy::from_probe(state, probe, connections))
+            }
+            DownloadKind::Direct if probe.resumable => {
             Arc::new(MultipartDownloadStrategy::from_probe(state, probe, connections))
-        } else {
-            Arc::new(OnePartDownloadStrategy::from_probe(state, probe))
+            }
+            DownloadKind::Direct => Arc::new(OnePartDownloadStrategy::from_probe(state, probe)),
         }
     }
 }
@@ -154,11 +159,20 @@ impl HttpDownloader {
     /// Probe the URL once, then select and construct the appropriate strategy.
     async fn select_strategy(&self) -> Result<Arc<dyn DownloadStrategy>, DownloadError> {
         if let Some(segments) = &self.persisted_segments {
-            return Ok(Arc::new(MultipartDownloadStrategy::from_persisted(
-                self.downloader_state.clone(),
-                segments.clone(),
-                self.connections,
-            )));
+            return Ok(match self.downloader_state.download_kind {
+                DownloadKind::Hls | DownloadKind::Dash => Arc::new(
+                    StreamingDownloadStrategy::from_persisted(
+                        self.downloader_state.clone(),
+                        segments.clone(),
+                        self.connections,
+                    ),
+                ),
+                DownloadKind::Direct => Arc::new(MultipartDownloadStrategy::from_persisted(
+                    self.downloader_state.clone(),
+                    segments.clone(),
+                    self.connections,
+                )),
+            });
         }
 
         // Build the client from DownloaderState so proxy/auth/custom headers are

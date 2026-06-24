@@ -14,6 +14,11 @@ tokio-util    = "0.7.18"
 uuid          = { version = "1.21.0", features = ["v4"] }
 async-trait   = "0.1.89"
 log           = "0.4.29"
+m3u8-rs       = "6.0.0"
+dash-mpd      = { version = "0.18.4", default-features = false }
+url           = "2.5.7"
+aes           = "0.8.4"
+cbc           = { version = "0.1.2", features = ["alloc"] }
 
 [dev-dependencies]
 wiremock  = "0.6"

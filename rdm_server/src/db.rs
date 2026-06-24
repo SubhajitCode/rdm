@@ -180,18 +180,20 @@ impl DownloadDatabase {
         let conn = self.open()?;
         conn.execute(
             "UPDATE downloads
-             SET status = ?2,
-                 downloader_state_json = ?3,
-                 segments_json = ?4,
-                 last_error = ?5,
-                 updated_at = CURRENT_TIMESTAMP
+            SET status = ?2,
+                output_path = COALESCE(?3, output_path),
+                downloader_state_json = ?4,
+                segments_json = ?5,
+                last_error = ?6,
+                updated_at = CURRENT_TIMESTAMP
              WHERE id = ?1",
             params![
-                id,
-                status.as_str(),
-                serde_json::to_string(downloader_state).map_err(|e| e.to_string())?,
-                serde_json::to_string(segments).map_err(|e| e.to_string())?,
-                last_error,
+               id,
+               status.as_str(),
+               downloader_state.output_path.clone(),
+               serde_json::to_string(downloader_state).map_err(|e| e.to_string())?,
+               serde_json::to_string(segments).map_err(|e| e.to_string())?,
+               last_error,
             ],
         )
         .map_err(|e| format!("failed to update runtime for {}: {}", id, e))?;
