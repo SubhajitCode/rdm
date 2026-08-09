@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
+use std::time::{Duration, Instant};
 
 use aes::Aes128;
 use async_trait::async_trait;
@@ -39,6 +40,14 @@ struct StreamingPlan {
     jobs: Vec<StreamingSegmentJob>,
     output_extension: String,
     content_type: Option<String>,
+    is_final: bool,
+    refresh_interval: Duration,
+}
+
+struct PlanRefresh {
+    plan: StreamingPlan,
+    added_jobs: usize,
+    became_final: bool,
 }
 
 pub struct StreamingDownloadStrategy {
@@ -50,6 +59,10 @@ pub struct StreamingDownloadStrategy {
     connections: usize,
     plan: Arc<RwLock<Option<StreamingPlan>>>,
 }
+
+const DEFAULT_STREAM_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const MAX_STREAM_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+const STREAM_COMPLETION_GRACE_PERIOD: Duration = Duration::from_secs(30);
 
 impl StreamingDownloadStrategy {
     pub fn from_state(state: DownloaderState, connections: usize) -> Self {
@@ -121,22 +134,16 @@ impl StreamingDownloadStrategy {
             Playlist::MediaPlaylist(media) => media,
         };
 
-        if !media.end_list {
-            return Err(DownloadError::SegmentFailed(
-                "live HLS playlists are not supported".to_string(),
-            ));
-        }
-
         let mut key_cache: HashMap<String, Vec<u8>> = HashMap::new();
         let mut jobs = Vec::new();
         let mut last_media_range_end: Option<(String, u64)> = None;
         let mut last_init_range_end: Option<(String, u64)> = None;
-        let mut next_ordinal = 0_i64;
         let mut last_map_id: Option<String> = None;
         let mut current_key = None;
         let mut current_map = None;
 
         for (index, segment) in media.segments.iter().enumerate() {
+            let segment_sequence = media.media_sequence + index as u64;
             if let Some(map) = &segment.map {
                 current_map = Some(map.clone());
             }
@@ -150,18 +157,18 @@ impl StreamingDownloadStrategy {
                     resolve_hls_byte_range(&init_url, range.length, range.offset, &mut last_init_range_end)
                 }).transpose()?;
                 let init_key = format!("{}::{:?}", init_url, init_range);
-                if last_map_id.as_deref() != Some(init_key.as_str()) {
+                let init_id = stable_stream_id("init", &init_key);
+                if last_map_id.as_deref() != Some(init_id.as_str()) {
                     jobs.push(StreamingSegmentJob {
-                        id: format!("init{:05}", jobs.len()),
-                        ordinal: next_ordinal,
+                        id: init_id.clone(),
+                        ordinal: init_segment_ordinal(segment_sequence),
                         url: init_url.clone(),
                         byte_range: init_range,
                         decryption_key: None,
                         decryption_iv: None,
                         stream_type: StreamType::Primary,
                     });
-                    next_ordinal += 1;
-                    last_map_id = Some(init_key);
+                    last_map_id = Some(init_id);
                 }
             }
 
@@ -179,15 +186,14 @@ impl StreamingDownloadStrategy {
                     .await?;
 
             jobs.push(StreamingSegmentJob {
-                id: format!("seg{:05}", index),
-                ordinal: next_ordinal,
+                id: format!("seg{segment_sequence:020}"),
+                ordinal: media_segment_ordinal(segment_sequence),
                 url: segment_url,
                 byte_range,
                 decryption_key,
                 decryption_iv,
                 stream_type: StreamType::Primary,
             });
-            next_ordinal += 1;
         }
 
         if jobs.is_empty() {
@@ -206,6 +212,8 @@ impl StreamingDownloadStrategy {
             jobs,
             output_extension,
             content_type: Some("video/mp2t".to_string()),
+            is_final: media.end_list,
+            refresh_interval: hls_refresh_interval(&media),
         })
     }
 
@@ -279,12 +287,6 @@ impl StreamingDownloadStrategy {
         let mpd: MPD =
             parse_mpd(&text).map_err(|err| DownloadError::SegmentFailed(format!("failed to parse DASH MPD: {err}")))?;
 
-        if mpd.mpdtype.as_deref() == Some("dynamic") {
-            return Err(DownloadError::SegmentFailed(
-                "live DASH manifests are not supported".to_string(),
-            ));
-        }
-
         let period = mpd
             .periods
             .first()
@@ -336,12 +338,19 @@ impl StreamingDownloadStrategy {
         let start_number = template.startNumber.unwrap_or(1);
 
         let mut jobs = Vec::new();
-        let mut ordinal = 0_i64;
-
         if let Some(initialization) = &template.initialization {
             jobs.push(StreamingSegmentJob {
-                id: "init00000".to_string(),
-                ordinal,
+                id: stable_stream_id(
+                    "init",
+                    &resolve_url(&base_url, &substitute_dash_template(
+                        initialization,
+                        representation.id.as_deref(),
+                        representation.bandwidth,
+                        start_number,
+                        0,
+                    ))?,
+                ),
+                ordinal: init_segment_ordinal(start_number),
                 url: resolve_url(&base_url, &substitute_dash_template(
                     initialization,
                     representation.id.as_deref(),
@@ -354,7 +363,6 @@ impl StreamingDownloadStrategy {
                 decryption_iv: None,
                 stream_type: StreamType::Primary,
             });
-            ordinal += 1;
         }
 
         let media_template = template.media.as_deref().ok_or_else(|| {
@@ -371,8 +379,8 @@ impl StreamingDownloadStrategy {
                 let repeats = segment.r.unwrap_or(0).max(0) as u64;
                 for _ in 0..=repeats {
                     jobs.push(StreamingSegmentJob {
-                        id: format!("seg{:05}", jobs.len()),
-                        ordinal,
+                        id: format!("seg{number:020}"),
+                        ordinal: media_segment_ordinal(number),
                         url: resolve_url(&base_url, &substitute_dash_template(
                             media_template,
                             representation.id.as_deref(),
@@ -385,7 +393,6 @@ impl StreamingDownloadStrategy {
                         decryption_iv: None,
                         stream_type: StreamType::Primary,
                     });
-                    ordinal += 1;
                     number += 1;
                     current_time = current_time.saturating_add(segment.d);
                 }
@@ -407,8 +414,8 @@ impl StreamingDownloadStrategy {
                 let number = start_number + index;
                 let time = index * duration_units as u64;
                 jobs.push(StreamingSegmentJob {
-                    id: format!("seg{:05}", jobs.len()),
-                    ordinal,
+                    id: format!("seg{number:020}"),
+                    ordinal: media_segment_ordinal(number),
                     url: resolve_url(&base_url, &substitute_dash_template(
                         media_template,
                         representation.id.as_deref(),
@@ -421,7 +428,6 @@ impl StreamingDownloadStrategy {
                     decryption_iv: None,
                     stream_type: StreamType::Primary,
                 });
-                ordinal += 1;
             }
         } else {
             return Err(DownloadError::SegmentFailed(
@@ -446,6 +452,8 @@ impl StreamingDownloadStrategy {
             jobs,
             output_extension,
             content_type: mime,
+            is_final: mpd.mpdtype.as_deref() != Some("dynamic"),
+            refresh_interval: dash_refresh_interval(&mpd),
         })
     }
 
@@ -547,17 +555,14 @@ impl StreamingDownloadStrategy {
         })
     }
 
-    async fn recover_existing_segments(&self, jobs: &[StreamingSegmentJob], temp_dir_path: &str) {
+    async fn sync_segments_with_jobs(&self, jobs: &[StreamingSegmentJob], temp_dir_path: &str) {
         let temp_dir = PathBuf::from(temp_dir_path);
         let mut current = self.segments.write().await;
-        let persisted = current.clone();
-        current.clear();
 
         for job in jobs {
-            let existing = persisted.get(&job.id).cloned();
             let path = temp_dir.join(&job.id);
             let restored = std::fs::metadata(&path).ok().map(|meta| meta.len() as i64).unwrap_or(0);
-            let mut segment = existing.unwrap_or_else(|| Segment {
+            let segment = current.entry(job.id.clone()).or_insert_with(|| Segment {
                 id: job.id.clone(),
                 offset: job.ordinal,
                 length: -1,
@@ -575,55 +580,34 @@ impl StreamingDownloadStrategy {
                 segment.downloaded = 0;
                 segment.state = SegmentState::NotStarted;
             }
-            current.insert(segment.id.clone(), segment);
         }
     }
-}
 
-#[async_trait]
-impl DownloadStrategy for StreamingDownloadStrategy {
-    fn set_progress_tx(&self, tx: mpsc::Sender<Result<ProgressEvent, String>>) {
-        *self.progress_tx.lock().unwrap() = Some(tx);
-    }
-
-    fn clear_progress_tx(&self) {
-        *self.progress_tx.lock().unwrap() = None;
-    }
-
-    async fn preprocess(&self) -> Result<(), DownloadError> {
-        probe_if_needed(&self.state, &self.client).await?;
-        self.state.write().unwrap().set_phase(DownloadPhase::Segmenting);
-
+    async fn refresh_plan(&self) -> Result<PlanRefresh, DownloadError> {
+        let incoming_plan = self.rebuild_plan().await?;
         let temp_dir_path = self.state.read().unwrap().temp_dir.clone();
-        tokio::fs::create_dir_all(&temp_dir_path)
-            .await
-            .map_err(DownloadError::Disk)?;
+        let existing_plan = self.plan.read().await.clone();
+        let (merged_plan, added_jobs, became_final) = merge_streaming_plans(existing_plan, incoming_plan);
 
-        let plan = self.rebuild_plan().await?;
+        self.sync_segments_with_jobs(&added_jobs, &temp_dir_path).await;
         {
             let mut state = self.state.write().unwrap();
-            state.resumable = true;
-            if state.download_kind == DownloadKind::Direct {
-                state.download_kind = detect_download_kind(&state.url, state.content_type.as_deref());
-            }
-            state.content_type = plan.content_type.clone().or(state.content_type.clone());
+            state.content_type = merged_plan.content_type.clone().or(state.content_type.clone());
         }
-        self.recover_existing_segments(&plan.jobs, &temp_dir_path).await;
-        *self.plan.write().await = Some(plan);
-        Ok(())
+        *self.plan.write().await = Some(merged_plan.clone());
+
+        Ok(PlanRefresh {
+            plan: merged_plan,
+            added_jobs: added_jobs.len(),
+            became_final,
+        })
     }
 
-    async fn download(&self) -> Result<(), DownloadError> {
-        self.state.write().unwrap().set_phase(DownloadPhase::Downloading { progress: None });
-
-        let plan = self
-            .plan
-            .read()
-            .await
-            .clone()
-            .ok_or(DownloadError::InvalidState)?;
-        let progress_tx = self.progress_tx.lock().unwrap().clone();
-
+    async fn download_pending_jobs(
+        &self,
+        plan: &StreamingPlan,
+        progress_tx: Option<mpsc::Sender<Result<ProgressEvent, String>>>,
+    ) -> Result<usize, DownloadError> {
         let current = self.segments.read().await.clone();
         let pending_jobs: Vec<_> = plan
             .jobs
@@ -632,7 +616,7 @@ impl DownloadStrategy for StreamingDownloadStrategy {
             .cloned()
             .collect();
         if pending_jobs.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
 
         let semaphore = Arc::new(Semaphore::new(self.connections.max(1)));
@@ -679,7 +663,93 @@ impl DownloadStrategy for StreamingDownloadStrategy {
             }
             return Err(err);
         }
+
+        Ok(plan
+            .jobs
+            .iter()
+            .filter(|job| current.get(&job.id).map(|segment| segment.state != SegmentState::Finished).unwrap_or(true))
+            .count())
+    }
+}
+
+#[async_trait]
+impl DownloadStrategy for StreamingDownloadStrategy {
+    fn set_progress_tx(&self, tx: mpsc::Sender<Result<ProgressEvent, String>>) {
+        *self.progress_tx.lock().unwrap() = Some(tx);
+    }
+
+    fn clear_progress_tx(&self) {
+        *self.progress_tx.lock().unwrap() = None;
+    }
+
+    async fn preprocess(&self) -> Result<(), DownloadError> {
+        probe_if_needed(&self.state, &self.client).await?;
+        self.state.write().unwrap().set_phase(DownloadPhase::Segmenting);
+
+        let temp_dir_path = self.state.read().unwrap().temp_dir.clone();
+        tokio::fs::create_dir_all(&temp_dir_path)
+            .await
+            .map_err(DownloadError::Disk)?;
+
+        let plan = self.rebuild_plan().await?;
+        {
+            let mut state = self.state.write().unwrap();
+            state.resumable = true;
+            if state.download_kind == DownloadKind::Direct {
+                state.download_kind = detect_download_kind(&state.url, state.content_type.as_deref());
+            }
+            state.content_type = plan.content_type.clone().or(state.content_type.clone());
+        }
+        self.sync_segments_with_jobs(&plan.jobs, &temp_dir_path).await;
+        *self.plan.write().await = Some(plan);
         Ok(())
+    }
+
+    async fn download(&self) -> Result<(), DownloadError> {
+        self.state.write().unwrap().set_phase(DownloadPhase::Downloading { progress: None });
+
+        let progress_tx = self.progress_tx.lock().unwrap().clone();
+        let mut last_growth_at = Instant::now();
+
+        loop {
+            if self.cancel_token.is_cancelled() {
+                return Err(DownloadError::Cancelled);
+            }
+
+            let plan = self
+                .plan
+                .read()
+                .await
+                .clone()
+                .ok_or(DownloadError::InvalidState)?;
+
+            let downloaded_jobs = self.download_pending_jobs(&plan, progress_tx.clone()).await?;
+            if downloaded_jobs > 0 {
+                last_growth_at = Instant::now();
+            }
+
+            if plan.is_final {
+                return Ok(());
+            }
+
+            tokio::time::sleep(plan.refresh_interval).await;
+            let refreshed = self.refresh_plan().await?;
+            if refreshed.added_jobs > 0 || refreshed.became_final {
+                last_growth_at = Instant::now();
+                if refreshed.plan.is_final && refreshed.added_jobs == 0 {
+                    return Ok(());
+                }
+                continue;
+            }
+
+            if last_growth_at.elapsed() >= STREAM_COMPLETION_GRACE_PERIOD {
+                log::info!(
+                    "No new stream segments after {:?}; treating stream as complete",
+                    STREAM_COMPLETION_GRACE_PERIOD
+                );
+                return Ok(());
+            }
+        }
     }
 
     async fn pause(&self) -> Result<(), DownloadError> {
@@ -785,6 +855,70 @@ fn resolve_stream_output_path(output_path: &Option<String>, output_extension: &s
 
 fn retry_backoff_ms(attempt: usize) -> u64 {
     100u64 * (1u64 << attempt.min(5))
+}
+
+fn hls_refresh_interval(media: &MediaPlaylist) -> Duration {
+    if media.target_duration == 0 {
+        return DEFAULT_STREAM_REFRESH_INTERVAL;
+    }
+    clamp_refresh_interval(Duration::from_secs(media.target_duration))
+}
+
+fn dash_refresh_interval(mpd: &MPD) -> Duration {
+    mpd.minimumUpdatePeriod
+        .or(mpd.maxSegmentDuration)
+        .map(clamp_refresh_interval)
+        .unwrap_or(DEFAULT_STREAM_REFRESH_INTERVAL)
+}
+
+fn clamp_refresh_interval(duration: Duration) -> Duration {
+    duration.max(Duration::from_secs(1)).min(MAX_STREAM_REFRESH_INTERVAL)
+}
+
+fn merge_streaming_plans(
+    existing: Option<StreamingPlan>,
+    mut incoming: StreamingPlan,
+) -> (StreamingPlan, Vec<StreamingSegmentJob>, bool) {
+    let Some(mut merged) = existing else {
+        let added = incoming.jobs.clone();
+        let became_final = incoming.is_final;
+        return (incoming, added, became_final);
+    };
+
+    let mut seen_ids: HashSet<String> = merged.jobs.iter().map(|job| job.id.clone()).collect();
+    let mut added_jobs = Vec::new();
+    for job in incoming.jobs.drain(..) {
+        if seen_ids.insert(job.id.clone()) {
+            added_jobs.push(job.clone());
+            merged.jobs.push(job);
+        }
+    }
+
+    merged.jobs.sort_by_key(|job| job.ordinal);
+    merged.output_extension = incoming.output_extension;
+    merged.content_type = incoming.content_type.or(merged.content_type);
+    merged.refresh_interval = incoming.refresh_interval;
+    let became_final = !merged.is_final && incoming.is_final;
+    merged.is_final = incoming.is_final;
+
+    (merged, added_jobs, became_final)
+}
+
+fn stable_stream_id(prefix: &str, value: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    format!("{prefix}{:016x}", hasher.finish())
+}
+
+fn init_segment_ordinal(sequence: u64) -> i64 {
+    sequence.saturating_mul(2) as i64
+}
+
+fn media_segment_ordinal(sequence: u64) -> i64 {
+    sequence.saturating_mul(2).saturating_add(1) as i64
 }
 
 fn resolve_url(base: &str, reference: &str) -> Result<String, DownloadError> {

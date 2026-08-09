@@ -1,4 +1,8 @@
 use std::path::PathBuf;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use aes::Aes128;
 use cbc::cipher::block_padding::Pkcs7;
@@ -75,6 +79,55 @@ async fn test_http_downloader_hls_aes128_decrypts_segments() {
 
     let output = std::fs::read(&output_name).unwrap();
     assert_eq!(output, [b"secret-one".as_slice(), b"secret-two".as_slice()].concat());
+
+    let _ = std::fs::remove_file(output_name);
+}
+
+#[tokio::test]
+async fn test_http_downloader_hls_waits_for_late_segments_before_finishing() {
+    let server = MockServer::start().await;
+    let playlist_requests = Arc::new(AtomicUsize::new(0));
+
+    let first_playlist = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\nseg1.ts\n";
+    let final_playlist =
+        "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\nseg1.ts\n#EXTINF:1.0,\nseg2.ts\n#EXT-X-ENDLIST\n";
+
+    Mock::given(method("GET"))
+        .and(path("/live.m3u8"))
+        .respond_with({
+            let playlist_requests = Arc::clone(&playlist_requests);
+            move |_req: &wiremock::Request| {
+                let request_index = playlist_requests.fetch_add(1, Ordering::SeqCst);
+                let body = if request_index < 2 {
+                    first_playlist
+                } else {
+                    final_playlist
+                };
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "application/vnd.apple.mpegurl")
+                    .set_body_string(body)
+            }
+        })
+        .mount(&server)
+        .await;
+
+    mount_bytes(&server, "/seg1.ts", b"segment-one".to_vec(), "video/mp2t").await;
+    mount_bytes(&server, "/seg2.ts", b"segment-two".to_vec(), "video/mp2t").await;
+
+    let output_name = format!("test_hls_live_{}.ts", uuid::Uuid::new_v4());
+    let state = DownloaderState::new(
+        format!("{}/live.m3u8", server.uri()),
+        PathBuf::from(&output_name),
+    );
+    let mut downloader = HttpDownloader::new(state, 2);
+    downloader.download().await.unwrap();
+
+    let output = std::fs::read(&output_name).unwrap();
+    assert_eq!(output, [b"segment-one".as_slice(), b"segment-two".as_slice()].concat());
+    assert!(
+        playlist_requests.load(Ordering::SeqCst) >= 3,
+        "expected at least one manifest refresh before finishing"
+    );
 
     let _ = std::fs::remove_file(output_name);
 }
